@@ -50,6 +50,18 @@ class Reports(commands.Cog):
             return False
         return any(r.id == self.cfg.staff_role_id for r in member.roles)
 
+    async def _send_modlog(self, guild: discord.Guild, embed: discord.Embed):
+        cid = getattr(self.cfg, "modlogs_channel_id", 0) or 0
+        if cid <= 0:
+            return
+        ch = guild.get_channel(cid)
+        if not ch:
+            return
+        try:
+            await ch.send(embed=embed)
+        except discord.Forbidden:
+            pass
+
     async def _block_gate(self, interaction: discord.Interaction) -> bool:
         if not interaction.guild:
             return True
@@ -167,6 +179,24 @@ class Reports(commands.Cog):
             reason=(reason or "").strip(),
         )
 
+        # Modlog
+        embed = discord.Embed(title="Report system block", color=discord.Color.red())
+        embed.add_field(name="User", value=f"{user.mention} (`{user.id}`)", inline=False)
+        embed.add_field(name="By", value=f"{interaction.user.mention} (`{interaction.user.id}`)", inline=False)
+
+        if duration_minutes is None:
+            embed.add_field(name="Duration", value="Permanent", inline=False)
+        else:
+            # Pull expires_at for exact time from DB (so it matches what the bot will enforce)
+            blocked, is_perm, expires_at, _ = self.db.is_user_blocked(interaction.guild.id, user.id)
+            exp_txt = _iso_to_discord_ts(expires_at) if expires_at else "unknown"
+            embed.add_field(name="Duration", value=f"{duration_minutes} minutes (expires {exp_txt})", inline=False)
+
+        if reason and reason.strip():
+            embed.add_field(name="Reason", value=reason.strip(), inline=False)
+
+        await self._send_modlog(interaction.guild, embed)
+
         if duration_minutes is None:
             await interaction.response.send_message(f"✅ Blocked {user.mention} permanently.", ephemeral=True)
         else:
@@ -184,6 +214,14 @@ class Reports(commands.Cog):
             return await interaction.response.send_message("❌ Not allowed.", ephemeral=True)
 
         removed = self.db.unblock_user(interaction.guild.id, user.id)
+
+        # Modlog
+        embed = discord.Embed(title="Report system unblock", color=discord.Color.green())
+        embed.add_field(name="User", value=f"{user.mention} (`{user.id}`)", inline=False)
+        embed.add_field(name="By", value=f"{interaction.user.mention} (`{interaction.user.id}`)", inline=False)
+        embed.add_field(name="Result", value="Unblocked" if removed else "User was not blocked", inline=False)
+        await self._send_modlog(interaction.guild, embed)
+
         if removed:
             await interaction.response.send_message(f"✅ Unblocked {user.mention}.", ephemeral=True)
         else:
@@ -210,12 +248,10 @@ class Reports(commands.Cog):
                 status = "Permanent"
             else:
                 status = f"Until {_iso_to_discord_ts(b['expires_at'])}" if b.get("expires_at") else "Temporary"
-            reason = f" — {b['reason']}" if b.get("reason") else ""
-            lines.append(f"<@{user_id}> (`{user_id}`) — **{status}**{reason}")
+            reason_txt = f" — {b['reason']}" if b.get("reason") else ""
+            lines.append(f"<@{user_id}> (`{user_id}`) — **{status}**{reason_txt}")
 
-        extra = ""
-        if len(blocks) > 20:
-            extra = f"\n…and {len(blocks) - 20} more."
+        extra = f"\n…and {len(blocks) - 20} more." if len(blocks) > 20 else ""
 
         embed = discord.Embed(
             title=f"Blocked users ({len(blocks)})",

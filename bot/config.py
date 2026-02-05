@@ -33,6 +33,7 @@ class Config:
     db_path: str
     tmdb_bearer_token: str
     staff_role_id: int
+    modlogs_channel_id: int
 
 
 def load_config() -> Config:
@@ -65,6 +66,8 @@ def load_config() -> Config:
     if staff_role_id <= 0:
         raise RuntimeError("Missing STAFF_ROLE_ID in .env")
 
+    modlogs_channel_id = int(os.getenv("MODLOGS_CHANNEL_ID", "0"))
+
     return Config(
         token=token,
         staff_channel_id=staff_channel_id,
@@ -76,4 +79,5 @@ def load_config() -> Config:
         db_path=db_path,
         tmdb_bearer_token=tmdb_bearer_token,
         staff_role_id=staff_role_id,
+        modlogs_channel_id=modlogs_channel_id,
     )
