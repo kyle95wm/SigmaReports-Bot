@@ -27,7 +27,6 @@ class Config:
     staff_channel_id: int
     support_channel_id: int
     reports_channel_ids: list[int]
-    reports_lockdown_channel_ids: list[int]
     staff_ping_user_ids: list[int]
     public_updates: bool
     db_path: str
@@ -49,13 +48,13 @@ def load_config() -> Config:
 
     reports_channel_ids = _csv_ids(os.getenv("REPORTS_CHANNEL_IDS", "").strip())
     if not reports_channel_ids:
+        # Legacy single-channel name support
         legacy = os.getenv("REPORTS_CHANNEL_ID", "").strip()
         if legacy.isdigit():
             reports_channel_ids = [int(legacy)]
     if not reports_channel_ids:
         raise RuntimeError("Missing REPORTS_CHANNEL_IDS (or REPORTS_CHANNEL_ID) in .env")
 
-    reports_lockdown_channel_ids = _csv_ids(os.getenv("REPORTS_LOCKDOWN_CHANNEL_IDS", "").strip())
     staff_ping_user_ids = _csv_ids(os.getenv("STAFF_PING_USER_IDS", "").strip())
 
     public_updates = _get_bool("PUBLIC_UPDATES", True)
@@ -73,7 +72,6 @@ def load_config() -> Config:
         staff_channel_id=staff_channel_id,
         support_channel_id=support_channel_id,
         reports_channel_ids=reports_channel_ids,
-        reports_lockdown_channel_ids=reports_lockdown_channel_ids,
         staff_ping_user_ids=staff_ping_user_ids,
         public_updates=public_updates,
         db_path=db_path,
