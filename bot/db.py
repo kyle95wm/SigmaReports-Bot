@@ -53,11 +53,8 @@ class ReportDB:
                 )
                 """
             )
-            con.execute(
-                "INSERT OR IGNORE INTO bot_settings (key, value) VALUES ('report_pings_enabled', '1')"
-            )
+            con.execute("INSERT OR IGNORE INTO bot_settings (key, value) VALUES ('report_pings_enabled', '1')")
 
-            # Blocks
             con.execute(
                 """
                 CREATE TABLE IF NOT EXISTS user_blocks (
@@ -236,3 +233,52 @@ class ReportDB:
             )
             con.commit()
             return cur.rowcount > 0
+
+    def list_blocks(self, guild_id: int) -> list[dict]:
+        """
+        Returns active (non-expired) blocks for this guild.
+        Each item: {user_id, is_permanent, expires_at, reason, created_by, created_at}
+        """
+        with self._conn() as con:
+            rows = con.execute(
+                """
+                SELECT user_id, is_permanent, expires_at, reason, created_by, created_at
+                FROM user_blocks
+                WHERE guild_id = ?
+                """,
+                (guild_id,),
+            ).fetchall()
+
+        active: list[dict] = []
+        now = datetime.now(timezone.utc)
+
+        for (user_id, is_perm_i, expires_at, reason, created_by, created_at) in rows:
+            is_perm = int(is_perm_i) == 1
+            if not is_perm:
+                dt = _parse_iso(expires_at) if expires_at else None
+                if (dt is None) or (dt <= now):
+                    # expired -> remove it
+                    self._cleanup_expired_block(guild_id, int(user_id))
+                    continue
+
+            active.append(
+                {
+                    "user_id": int(user_id),
+                    "is_permanent": is_perm,
+                    "expires_at": expires_at,
+                    "reason": reason or "",
+                    "created_by": int(created_by) if created_by is not None else None,
+                    "created_at": created_at,
+                }
+            )
+
+        # Permanent first, then soonest expiry
+        def _sort_key(x: dict):
+            if x["is_permanent"]:
+                return (0, 0)
+            dt = _parse_iso(x["expires_at"] or "")
+            ts = int(dt.timestamp()) if dt else 2**31
+            return (1, ts)
+
+        active.sort(key=_sort_key)
+        return active
