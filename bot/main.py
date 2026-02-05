@@ -71,6 +71,7 @@ class SigmaReportsBot(commands.Bot):
         # ✅ Instant guild sync (your server)
         guild_id = 1457559352717086917
         guild = discord.Object(id=guild_id)
+        self.tree.copy_global_to(guild=guild)
         synced = await self.tree.sync(guild=guild)
         print(f"Synced {len(synced)} commands to guild {guild_id}")
 
