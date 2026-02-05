@@ -15,8 +15,6 @@ except Exception:
     aiohttp = None  # type: ignore
 
 
-# --- Presence pools (tweak these any time) ---
-
 IPTV_FLAVOR = [
     "IPTV playlists",
     "Live TV",
@@ -64,13 +62,15 @@ class SigmaReportsBot(commands.Bot):
             )
         )
 
-        # Load cogs
+        # Load cogs (registers app commands)
         await self.load_extension("bot.cogs.reports")
 
-        # Guild sync (your server)
-        # If you later want to support multiple guilds, move this to /synccommands only.
+        # ✅ Guild sync for fast command availability
         guild_id = 1457559352717086917
         guild = discord.Object(id=guild_id)
+
+        # IMPORTANT: copy global commands into the guild before syncing
+        self.tree.copy_global_to(guild=guild)
 
         synced = await self.tree.sync(guild=guild)
         print(f"Synced {len(synced)} commands to guild {guild_id}")
@@ -82,13 +82,9 @@ class SigmaReportsBot(commands.Bot):
         if self._presence_task is None or self._presence_task.done():
             self._presence_task = asyncio.create_task(self._presence_rotator())
 
-    # ---------------- Presence rotation (5 min) ----------------
-
     async def _presence_rotator(self):
-        # Ensure we're connected + ready before trying to set presence
         await self.wait_until_ready()
 
-        # Prime TMDB cache once
         try:
             await self._refresh_tmdb_cache()
         except Exception as e:
@@ -99,13 +95,11 @@ class SigmaReportsBot(commands.Bot):
             try:
                 await self._set_random_presence()
             except Exception as e:
-                # IMPORTANT: don't swallow this silently
                 print("Presence: change_presence failed:", repr(e))
 
             await asyncio.sleep(300)  # 5 minutes
             ticks += 1
 
-            # every 6 hours (72 * 5min)
             if ticks % 72 == 0:
                 try:
                     await self._refresh_tmdb_cache()
@@ -127,8 +121,6 @@ class SigmaReportsBot(commands.Bot):
 
         choice = random.choice(pool)
         activity = discord.Activity(type=discord.ActivityType.watching, name=choice)
-
-        # Explicitly set status online too
         await self.change_presence(status=discord.Status.online, activity=activity)
         print(f"Presence set: Watching {choice}")
 
@@ -165,7 +157,6 @@ class SigmaReportsBot(commands.Bot):
                         if name:
                             titles.append(name)
 
-        # Dedup
         deduped: list[str] = []
         seen = set()
         for t in titles:
