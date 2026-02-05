@@ -64,13 +64,18 @@ def build_staff_embed(
         embed.add_field(name="Title", value=payload.get("title", "—"), inline=False)
         embed.add_field(name="Quality", value=payload.get("quality", "—"), inline=True)
 
-        # ✅ NEW: TheTVDB link
-        tvdb = payload.get("thetvdb_link") or payload.get("tvdb_link") or "—"
-        embed.add_field(name="TheTVDB link", value=tvdb, inline=False)
+        # Option B: one generic reference link field.
+        # Backward compatible with older keys you may have stored already.
+        ref = (
+            payload.get("reference_link")
+            or payload.get("thetvdb_link")
+            or payload.get("tvdb_link")
+            or "—"
+        )
+        embed.add_field(name="Reference link", value=ref, inline=False)
 
         embed.add_field(name="Issue", value=payload.get("issue", "—"), inline=False)
 
-    # ✅ Button explanations (with follow-up clarification)
     embed.add_field(
         name="Staff actions",
         value=(
