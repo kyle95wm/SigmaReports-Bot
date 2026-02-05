@@ -43,15 +43,16 @@ IPTV_FLAVOR = [
 ]
 
 
-def seconds_until_next_interval(minutes: int = 10) -> float:
+def seconds_until_next_interval(minutes: int = 5) -> float:
     """
-    Sleep until the next "clean" interval boundary.
-    For minutes=10, aligns to :00, :10, :20, :30, :40, :50 (UTC).
+    Sleep until the next clean interval boundary.
+    For minutes=5 → :00, :05, :10, :15, :20, ...
     """
     now = datetime.now(timezone.utc)
 
-    # Round down to the most recent boundary, then add interval
-    rounded = now.replace(second=0, microsecond=0) - timedelta(minutes=(now.minute % minutes))
+    rounded = now.replace(second=0, microsecond=0) - timedelta(
+        minutes=(now.minute % minutes)
+    )
     next_tick = rounded + timedelta(minutes=minutes)
 
     return (next_tick - now).total_seconds()
@@ -91,10 +92,8 @@ class ReportsBot(commands.Bot):
         pool.extend(LOCAL_CHANNELS)
         pool.extend(self._tmdb_cache)
 
-        # keep it from getting huge
-        if len(pool) > 250:
-            pool = pool[:250]
-        return pool
+        # Prevent runaway size
+        return pool[:250] if len(pool) > 250 else pool
 
     async def _refresh_tmdb_cache(self):
         token = self.cfg.tmdb_bearer_token
@@ -107,7 +106,7 @@ class ReportsBot(commands.Bot):
             cleaned = [t for t in titles if 1 <= len(t) <= 48]
             self._tmdb_cache = cleaned[:120]
         except Exception:
-            # Keep old cache if TMDB is having a moment
+            # Keep existing cache if TMDB fails
             pass
 
     async def _set_random_presence(self):
@@ -119,22 +118,21 @@ class ReportsBot(commands.Bot):
     async def _presence_rotator(self):
         await self.wait_until_ready()
 
-        # Refresh titles once at startup, then set presence immediately
+        # Initial refresh + immediate presence
         await self._refresh_tmdb_cache()
         try:
             await self._set_random_presence()
         except Exception:
             pass
 
-        # Refresh TMDB every 6 hours; rotate presence every 10 minutes
+        # Refresh TMDB every 6 hours
         tmdb_refresh_interval = 6 * 60 * 60
         next_tmdb_refresh = asyncio.get_event_loop().time() + tmdb_refresh_interval
 
         while not self.is_closed():
             try:
-                await asyncio.sleep(seconds_until_next_interval(10))
+                await asyncio.sleep(seconds_until_next_interval(5))
 
-                # Refresh TMDB occasionally
                 if asyncio.get_event_loop().time() >= next_tmdb_refresh:
                     await self._refresh_tmdb_cache()
                     next_tmdb_refresh = asyncio.get_event_loop().time() + tmdb_refresh_interval
@@ -143,7 +141,6 @@ class ReportsBot(commands.Bot):
             except asyncio.CancelledError:
                 return
             except Exception:
-                # don’t spin if Discord errors temporarily
                 await asyncio.sleep(60)
 
     async def on_message(self, message: discord.Message):
