@@ -1,6 +1,11 @@
 import discord
 from discord.ext import commands
+
 from bot.modals import TVReportModal, VODReportModal
+
+
+# 🔒 Only this user can run /reportpings
+REPORTPINGS_OWNER_ID = 1229271933736976395
 
 
 class Reports(commands.Cog):
@@ -31,6 +36,7 @@ class Reports(commands.Cog):
             return await interaction.response.send_message(
                 f"Use this command in: {self._allowed_channels_hint(interaction)}."
             )
+
         await interaction.response.send_modal(TVReportModal(self.db, self.cfg))
 
     @discord.app_commands.command(
@@ -42,17 +48,26 @@ class Reports(commands.Cog):
             return await interaction.response.send_message(
                 f"Use this command in: {self._allowed_channels_hint(interaction)}."
             )
+
         await interaction.response.send_modal(VODReportModal(self.db, self.cfg))
 
     @discord.app_commands.command(
         name="reportpings",
-        description="Toggle staff pings for new reports (debug).",
+        description="Toggle staff pings for new reports (owner only).",
     )
     async def reportpings(self, interaction: discord.Interaction):
-        # Optional: lock this to staff-only channel(s) by adding checks here.
+        if interaction.user.id != REPORTPINGS_OWNER_ID:
+            return await interaction.response.send_message(
+                "❌ You are not allowed to use this command.",
+                ephemeral=True,
+            )
+
         enabled = self.db.toggle_report_pings()
-        state = "ON ✅" if enabled else "OFF 🛑"
-        await interaction.response.send_message(f"Staff pings for new reports are now: **{state}**")
+        state = "ON 🔔" if enabled else "OFF 🔕"
+        await interaction.response.send_message(
+            f"Staff pings for new reports are now: **{state}**",
+            ephemeral=True,
+        )
 
 
 async def setup(bot):
