@@ -8,48 +8,53 @@ from discord.ext import commands
 from bot.config import load_config
 from bot.db import ReportDB
 from bot.views import ReportActionView
+from bot.tmdb import fetch_tmdb_titles
 
 
-# Edit this list whenever you want. Keep them short so they fit nicely.
-WATCHING_STATUSES = [
-    "IPTV playlists",
-    "live channel guides (EPG)",
-    "buffering complaints",
-    "sports blackouts (again)",
-    "the stream health dashboard",
-    "channel logos load",
-    "VOD playback retries",
-    "4K HDR test clips",
-    "audio sync checks",
-    "subtitle reports",
-    "Sky Sports News",
+LOCAL_CHANNELS = [
     "BBC One",
-    "CNN",
+    "BBC Two",
+    "ITV1",
+    "Channel 4",
+    "Channel 5",
+    "Sky Sports Main Event",
+    "Sky Sports News",
+    "TNT Sports 1",
     "ESPN",
-    "HBO",
+    "FOX Sports",
+    "CNN",
     "Discovery Channel",
     "National Geographic",
     "Cartoon Network",
     "Nickelodeon",
-    "The Office",
-    "Breaking Bad",
-    "Stranger Things",
-    "Game of Thrones",
-    "The Mandalorian",
-    "The Last of Us",
-    "The Boys",
-    "Inception",
-    "Interstellar",
-    "The Dark Knight",
-    "Avengers: Endgame",
-    "Spider-Man: Into the Spider-Verse",
+    "HBO",
+]
+
+IPTV_FLAVOR = [
+    "IPTV playlists",
+    "live channel guides (EPG)",
+    "buffering complaints",
+    "stream uptime",
+    "audio sync checks",
+    "subtitle reports",
+    "4K test clips",
+    "VOD playback retries",
+    "channel logo packs",
 ]
 
 
-def seconds_until_next_hour() -> float:
+def seconds_until_next_interval(minutes: int = 10) -> float:
+    """
+    Sleep until the next "clean" interval boundary.
+    For minutes=10, aligns to :00, :10, :20, :30, :40, :50 (UTC).
+    """
     now = datetime.now(timezone.utc)
-    next_hour = (now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1))
-    return (next_hour - now).total_seconds()
+
+    # Round down to the most recent boundary, then add interval
+    rounded = now.replace(second=0, microsecond=0) - timedelta(minutes=(now.minute % minutes))
+    next_tick = rounded + timedelta(minutes=minutes)
+
+    return (next_tick - now).total_seconds()
 
 
 class ReportsBot(commands.Bot):
@@ -60,6 +65,7 @@ class ReportsBot(commands.Bot):
         self.cfg = load_config()
         self.db = ReportDB(self.cfg.db_path)
 
+        self._tmdb_cache: list[str] = []
         self._presence_task: asyncio.Task | None = None
 
     async def setup_hook(self):
@@ -71,43 +77,76 @@ class ReportsBot(commands.Bot):
                 self.cfg.public_updates,
             )
         )
-
         await self.load_extension("bot.cogs.reports")
         await self.tree.sync()
 
-        # Start rotating presence
         self._presence_task = asyncio.create_task(self._presence_rotator())
 
     async def on_ready(self):
         print(f"Logged in as {self.user} (ID: {self.user.id})")
 
+    def _build_status_pool(self) -> list[str]:
+        pool: list[str] = []
+        pool.extend(IPTV_FLAVOR)
+        pool.extend(LOCAL_CHANNELS)
+        pool.extend(self._tmdb_cache)
+
+        # keep it from getting huge
+        if len(pool) > 250:
+            pool = pool[:250]
+        return pool
+
+    async def _refresh_tmdb_cache(self):
+        token = self.cfg.tmdb_bearer_token
+        if not token:
+            self._tmdb_cache = []
+            return
+
+        try:
+            titles = await asyncio.to_thread(fetch_tmdb_titles, token, 40)
+            cleaned = [t for t in titles if 1 <= len(t) <= 48]
+            self._tmdb_cache = cleaned[:120]
+        except Exception:
+            # Keep old cache if TMDB is having a moment
+            pass
+
     async def _set_random_presence(self):
-        text = random.choice(WATCHING_STATUSES)
+        pool = self._build_status_pool()
+        text = random.choice(pool) if pool else "reports"
         activity = discord.Activity(type=discord.ActivityType.watching, name=text)
         await self.change_presence(activity=activity)
 
     async def _presence_rotator(self):
-        # Set immediately on startup
+        await self.wait_until_ready()
+
+        # Refresh titles once at startup, then set presence immediately
+        await self._refresh_tmdb_cache()
         try:
-            await self.wait_until_ready()
             await self._set_random_presence()
         except Exception:
-            # don’t crash the bot if presence update fails
-            return
+            pass
 
-        # Then update every hour, on the hour (UTC)
+        # Refresh TMDB every 6 hours; rotate presence every 10 minutes
+        tmdb_refresh_interval = 6 * 60 * 60
+        next_tmdb_refresh = asyncio.get_event_loop().time() + tmdb_refresh_interval
+
         while not self.is_closed():
             try:
-                await asyncio.sleep(seconds_until_next_hour())
+                await asyncio.sleep(seconds_until_next_interval(10))
+
+                # Refresh TMDB occasionally
+                if asyncio.get_event_loop().time() >= next_tmdb_refresh:
+                    await self._refresh_tmdb_cache()
+                    next_tmdb_refresh = asyncio.get_event_loop().time() + tmdb_refresh_interval
+
                 await self._set_random_presence()
             except asyncio.CancelledError:
                 return
             except Exception:
-                # keep looping even if Discord errors temporarily
+                # don’t spin if Discord errors temporarily
                 await asyncio.sleep(60)
 
     async def on_message(self, message: discord.Message):
-        # Keep your existing message-lockdown behavior
         if message.author.bot:
             return
 

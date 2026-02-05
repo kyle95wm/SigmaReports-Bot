@@ -31,11 +31,12 @@ class Config:
     token: str
     staff_channel_id: int
     support_channel_id: int
-    reports_channel_ids: list[int]           # where slash commands are allowed
-    reports_lockdown_channel_ids: list[int]  # where messages get deleted
+    reports_channel_ids: list[int]
+    reports_lockdown_channel_ids: list[int]
     staff_ping_user_ids: list[int]
     public_updates: bool
     db_path: str
+    tmdb_bearer_token: str  # optional
 
 
 def load_config() -> Config:
@@ -43,20 +44,19 @@ def load_config() -> Config:
     staff = int(os.getenv("STAFF_CHANNEL_ID", "0"))
     support = int(os.getenv("SUPPORT_CHANNEL_ID", "0"))
 
-    # Allow list for commands
     reports_channels = _get_channel_id_list("REPORTS_CHANNEL_IDS")
     if not reports_channels:
-        # Backward compat
         legacy = os.getenv("REPORTS_CHANNEL_ID", "").strip()
         if legacy.isdigit():
             reports_channels = [int(legacy)]
 
-    # Lockdown list for deleting messages (optional)
     lockdown_channels = _get_channel_id_list("REPORTS_LOCKDOWN_CHANNEL_IDS")
 
     staff_pings = _get_id_list_from_csv(os.getenv("STAFF_PING_USER_IDS", ""))
     public_updates = _get_bool("PUBLIC_UPDATES", True)
     db_path = os.getenv("DB_PATH", "./data/reports.sqlite3")
+
+    tmdb_token = os.getenv("TMDB_BEARER_TOKEN", "").strip()
 
     if not token:
         raise RuntimeError("Missing DISCORD_TOKEN in .env")
@@ -74,4 +74,5 @@ def load_config() -> Config:
         staff_ping_user_ids=staff_pings,
         public_updates=public_updates,
         db_path=db_path,
+        tmdb_bearer_token=tmdb_token,
     )
