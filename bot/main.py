@@ -1,4 +1,5 @@
 import asyncio
+import os
 import random
 from typing import Optional
 
@@ -65,12 +66,32 @@ class SigmaReportsBot(commands.Bot):
             )
         )
 
-        # Load cogs
-        await self.load_extension("bot.cogs.reports")
-
-        # ✅ Instant guild sync (your server)
         guild_id = 1457559352717086917
         guild = discord.Object(id=guild_id)
+
+        # ---- Optional one-time cleanup for duplicate commands ----
+        # If you've ever synced globally and then guild-synced, Discord can show duplicates.
+        # Set CLEAN_DUPLICATE_COMMANDS=1 in .env, deploy once, then set it back to 0.
+        if os.getenv("CLEAN_DUPLICATE_COMMANDS", "0").strip() == "1":
+            print("CLEAN_DUPLICATE_COMMANDS=1 -> clearing global + guild commands...")
+
+            # Clear ALL global commands currently registered (in Discord)
+            self.tree.clear_commands(guild=None)
+            await self.tree.sync()
+            print("Cleared global commands.")
+
+            # Clear ALL guild commands currently registered for this guild
+            self.tree.clear_commands(guild=guild)
+            await self.tree.sync(guild=guild)
+            print(f"Cleared guild commands for {guild_id}.")
+
+        # Load cogs (registers slash commands into the tree)
+        await self.load_extension("bot.cogs.reports")
+
+        # Helpful debug line
+        print("Tree before sync:", [c.name for c in self.tree.get_commands()])
+
+        # ✅ Ensure guild commands match our current tree (helps when Discord gets 'stuck')
         self.tree.copy_global_to(guild=guild)
         synced = await self.tree.sync(guild=guild)
         print(f"Synced {len(synced)} commands to guild {guild_id}")
@@ -132,7 +153,6 @@ class SigmaReportsBot(commands.Bot):
             "accept": "application/json",
         }
 
-        # Grab trending movies + shows; keep it lightweight and safe
         urls = [
             "https://api.themoviedb.org/3/trending/movie/day",
             "https://api.themoviedb.org/3/trending/tv/day",
@@ -153,13 +173,14 @@ class SigmaReportsBot(commands.Bot):
                 except Exception:
                     continue
 
-        # Keep a small, deduped cache
-        deduped = []
+        # Dedup + cap size
+        deduped: list[str] = []
         seen = set()
         for t in titles:
-            if t.lower() in seen:
+            key = t.lower()
+            if key in seen:
                 continue
-            seen.add(t.lower())
+            seen.add(key)
             deduped.append(t)
 
         self._tmdb_cache = deduped[:50]
