@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.env
+data/
+
+# OS noise
+.DS_Store
+
+# Editors
+.vscode/
+.idea/
