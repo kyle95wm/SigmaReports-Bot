@@ -31,6 +31,35 @@ async def try_dm(user: discord.User, content: str) -> bool:
         return False
 
 
+def _format_reference_link(payload: dict) -> str:
+    """
+    Returns a human-friendly, clickable reference link.
+    Supports TheTVDB, TMDB, IMDb.
+    """
+    url = (
+        payload.get("reference_link")
+        or payload.get("thetvdb_link")
+        or payload.get("tvdb_link")
+    )
+
+    if not url or not isinstance(url, str):
+        return "—"
+
+    url_l = url.lower()
+
+    if "thetvdb.com" in url_l:
+        label = "TheTVDB"
+    elif "themoviedb.org" in url_l or "tmdb.org" in url_l:
+        label = "TMDB"
+    elif "imdb.com" in url_l:
+        label = "IMDb"
+    else:
+        label = "Reference link"
+
+    # Discord supports Markdown links in embeds
+    return f"[{label}]({url})"
+
+
 def build_staff_embed(
     report_id: int,
     report_type: str,
@@ -48,7 +77,11 @@ def build_staff_embed(
     )
 
     embed.add_field(name="Status", value=status, inline=True)
-    embed.add_field(name="Reporter", value=f"{reporter.mention} (`{reporter.id}`)", inline=False)
+    embed.add_field(
+        name="Reporter",
+        value=f"{reporter.mention} (`{reporter.id}`)",
+        inline=False,
+    )
     embed.add_field(
         name="Reported from",
         value=source_channel.mention if source_channel else "Unknown",
@@ -64,15 +97,12 @@ def build_staff_embed(
         embed.add_field(name="Title", value=payload.get("title", "—"), inline=False)
         embed.add_field(name="Quality", value=payload.get("quality", "—"), inline=True)
 
-        # Option B: one generic reference link field.
-        # Backward compatible with older keys you may have stored already.
-        ref = (
-            payload.get("reference_link")
-            or payload.get("thetvdb_link")
-            or payload.get("tvdb_link")
-            or "—"
+        # ✅ Clickable, labeled reference link
+        embed.add_field(
+            name="Reference",
+            value=_format_reference_link(payload),
+            inline=False,
         )
-        embed.add_field(name="Reference link", value=ref, inline=False)
 
         embed.add_field(name="Issue", value=payload.get("issue", "—"), inline=False)
 
@@ -93,4 +123,5 @@ def build_staff_embed(
             "Only Fixed or Can't replicate closes the report."
         )
     )
+
     return embed
