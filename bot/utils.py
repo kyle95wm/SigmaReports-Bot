@@ -1,16 +1,4 @@
-from datetime import datetime, timezone
 import discord
-
-
-def status_color(status: str) -> discord.Color:
-    s = status.lower()
-    if s == "fixed":
-        return discord.Color.green()
-    if "can't" in s or "cant" in s:
-        return discord.Color.orange()
-    if "more info" in s:
-        return discord.Color.gold()
-    return discord.Color.blurple()
 
 
 def report_subject(report_type: str, payload: dict) -> str:
@@ -21,43 +9,94 @@ def report_subject(report_type: str, payload: dict) -> str:
     return "Report"
 
 
-async def try_dm(user: discord.User, content: str) -> bool:
-    try:
-        await user.send(content)
-        return True
-    except discord.Forbidden:
-        return False
-
-
 def build_staff_embed(
     report_id: int,
     report_type: str,
     reporter: discord.User,
     source_channel: discord.abc.GuildChannel,
     payload: dict,
-    status: str,
+    status: str = "Open",
 ) -> discord.Embed:
-    subject = report_subject(report_type, payload)
-
     embed = discord.Embed(
-        title=f"Report #{report_id} — {report_type.upper()} — {subject}",
-        color=status_color(status),
-        timestamp=datetime.now(timezone.utc),
+        title=f"📺 New {report_type.upper()} Report #{report_id}",
+        color=discord.Color.orange() if status == "Open" else discord.Color.green(),
     )
 
-    embed.add_field(name="Status", value=status, inline=True)
-    embed.add_field(name="Reporter", value=f"{reporter.mention} (`{reporter.id}`)", inline=False)
-    embed.add_field(name="Reported from", value=source_channel.mention, inline=False)
+    embed.add_field(
+        name="Reporter",
+        value=f"{reporter.mention}\n`{reporter.id}`",
+        inline=True,
+    )
+
+    embed.add_field(
+        name="Source Channel",
+        value=source_channel.mention if source_channel else "Unknown",
+        inline=True,
+    )
 
     if report_type == "tv":
-        embed.add_field(name="Channel", value=payload.get("channel_name", "—"), inline=True)
-        embed.add_field(name="Category", value=payload.get("channel_category", "—"), inline=True)
-        embed.add_field(name="Issue", value=payload.get("issue", "—"), inline=False)
+        embed.add_field(
+            name="Channel",
+            value=payload.get("channel_name", "N/A"),
+            inline=False,
+        )
+        embed.add_field(
+            name="Category",
+            value=payload.get("channel_category", "N/A"),
+            inline=True,
+        )
+        embed.add_field(
+            name="Issue",
+            value=payload.get("issue", "N/A"),
+            inline=False,
+        )
 
-    if report_type == "vod":
-        embed.add_field(name="Title", value=payload.get("title", "—"), inline=True)
-        embed.add_field(name="Quality", value=payload.get("quality", "—"), inline=True)
-        embed.add_field(name="Issue", value=payload.get("issue", "—"), inline=False)
+    elif report_type == "vod":
+        embed.add_field(
+            name="Title",
+            value=payload.get("title", "N/A"),
+            inline=False,
+        )
+        embed.add_field(
+            name="Quality",
+            value=payload.get("quality", "N/A"),
+            inline=True,
+        )
+        embed.add_field(
+            name="Issue",
+            value=payload.get("issue", "N/A"),
+            inline=False,
+        )
 
-    embed.set_footer(text="Staff actions notify the reporter automatically.")
+    embed.add_field(
+        name="Status",
+        value=status,
+        inline=True,
+    )
+
+    embed.add_field(
+        name="Staff actions",
+        value=(
+            "✅ **Fixed** — Issue confirmed and resolved (closes the report)\n"
+            "⚠️ **Can't replicate** — Issue could not be reproduced (closes the report)\n"
+            "📝 **More info required** — Ask the user to submit a new report with additional details\n"
+            "💬 **Send follow-up** — Send status updates or informational messages **without closing the report**"
+        ),
+        inline=False,
+    )
+
+    embed.set_footer(
+        text=(
+            "Follow-ups are one-way updates to the reporter. "
+            "Only Fixed or Can't replicate will close the report."
+        )
+    )
+
     return embed
+
+
+async def try_dm(user: discord.User, content: str):
+    try:
+        await user.send(content)
+    except discord.Forbidden:
+        pass
