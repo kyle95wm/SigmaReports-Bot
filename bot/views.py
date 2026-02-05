@@ -24,11 +24,18 @@ class StaffFollowUpModal(discord.ui.Modal, title="Send follow-up message"):
         if not interaction.guild:
             return await interaction.response.send_message("❌ This must be used in a server.")
 
-        reporter = await interaction.client.fetch_user(report["reporter_id"])
+        try:
+            reporter = await interaction.client.fetch_user(report["reporter_id"])
+        except Exception:
+            reporter = interaction.client.get_user(report["reporter_id"])
+
+        if not reporter:
+            return await interaction.response.send_message("❌ Couldn’t find the reporter user.")
+
         source = interaction.guild.get_channel(report["source_channel_id"]) or interaction.channel
         subject = report_subject(report["report_type"], report["payload"])
 
-        text = str(self.message).strip()
+        text = (self.message.value or "").strip()
         if not text:
             return await interaction.response.send_message("❌ Follow-up message can’t be empty.")
 
@@ -56,18 +63,19 @@ class ReportActionView(discord.ui.View):
         self.db = db
         self.staff_channel_id = staff_channel_id
         self.support_channel_id = support_channel_id
+        self.public_updates = public_updates
 
     @discord.ui.button(label="Fixed", style=discord.ButtonStyle.success, custom_id="report:fixed")
     async def fixed(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self._handle_status(interaction, button, "Fixed")
+        await self._handle_status(interaction, "Fixed")
 
     @discord.ui.button(label="Can't replicate", style=discord.ButtonStyle.secondary, custom_id="report:cant")
     async def cant(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self._handle_status(interaction, button, "Can't replicate")
+        await self._handle_status(interaction, "Can't replicate")
 
     @discord.ui.button(label="More info required", style=discord.ButtonStyle.primary, custom_id="report:more_info")
     async def more_info(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self._handle_status(interaction, button, "More info required")
+        await self._handle_status(interaction, "More info required")
 
     @discord.ui.button(label="Send follow-up", style=discord.ButtonStyle.secondary, custom_id="report:followup")
     async def follow_up(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -81,10 +89,9 @@ class ReportActionView(discord.ui.View):
         if not interaction.message:
             return await interaction.response.send_message("❌ Couldn’t read the report message.")
 
-        # Open modal to type the follow-up message
         await interaction.response.send_modal(StaffFollowUpModal(self.db, interaction.message.id))
 
-    async def _handle_status(self, interaction: discord.Interaction, button: discord.ui.Button, status: str):
+    async def _handle_status(self, interaction: discord.Interaction, status: str):
         # Keep buttons limited to staff channel
         if not interaction.guild or not interaction.channel:
             return await interaction.response.send_message("❌ This can only be used in a server.")
@@ -99,9 +106,18 @@ class ReportActionView(discord.ui.View):
         if not report:
             return await interaction.response.send_message("❌ Report not found.")
 
+        # Update DB status
         self.db.update_status(report["id"], status)
 
-        reporter = await interaction.client.fetch_user(report["reporter_id"])
+        # Fetch reporter (best-effort)
+        try:
+            reporter = await interaction.client.fetch_user(report["reporter_id"])
+        except Exception:
+            reporter = interaction.client.get_user(report["reporter_id"])
+
+        if not reporter:
+            return await interaction.response.send_message("❌ Couldn’t find the reporter user.")
+
         source = interaction.guild.get_channel(report["source_channel_id"]) or interaction.channel
         subject = report_subject(report["report_type"], report["payload"])
 
@@ -115,14 +131,16 @@ class ReportActionView(discord.ui.View):
             status,
         )
 
-        # Disable ONLY the three status buttons after one status is chosen
-        for child in self.children:
-            if isinstance(child, discord.ui.Button) and child.custom_id in (
-                "report:fixed",
-                "report:cant",
-                "report:more_info",
-            ):
-                child.disabled = True
+        # ✅ Only disable status buttons for terminal outcomes
+        terminal = status in ("Fixed", "Can't replicate")
+        if terminal:
+            for child in self.children:
+                if isinstance(child, discord.ui.Button) and child.custom_id in (
+                    "report:fixed",
+                    "report:cant",
+                    "report:more_info",
+                ):
+                    child.disabled = True
 
         await interaction.response.edit_message(embed=embed, view=self)
 
@@ -141,7 +159,7 @@ class ReportActionView(discord.ui.View):
 
         # Public + DM update
         try:
-            if isinstance(source, discord.TextChannel):
+            if isinstance(source, discord.TextChannel) and self.public_updates:
                 await source.send(public_update)
         except discord.Forbidden:
             pass
@@ -157,14 +175,14 @@ class ReportActionView(discord.ui.View):
                 msg = "⚠️ We are unable to replicate the issue. Please open a ticket in the ticket channel so we can assist further."
 
             try:
-                if isinstance(source, discord.TextChannel):
+                if isinstance(source, discord.TextChannel) and self.public_updates:
                     await source.send(f"{reporter.mention} {msg}")
             except discord.Forbidden:
                 pass
 
             await try_dm(reporter, msg)
 
-        # More info required flow
+        # More info required flow (buttons stay active)
         if status == "More info required":
             msg = (
                 f"📝 We need more information for **report #{report['id']}** (**{subject}**).\n"
@@ -176,7 +194,7 @@ class ReportActionView(discord.ui.View):
             )
 
             try:
-                if isinstance(source, discord.TextChannel):
+                if isinstance(source, discord.TextChannel) and self.public_updates:
                     await source.send(f"{reporter.mention} {msg}")
             except discord.Forbidden:
                 pass
