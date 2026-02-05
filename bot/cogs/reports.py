@@ -4,6 +4,8 @@ from discord.ext import commands
 from datetime import datetime, timezone
 
 from bot.modals import TVReportModal, VODReportModal
+from bot.views import ReportActionView
+from bot.utils import build_staff_embed
 
 OWNER_ID = 1229271933736976395
 
@@ -49,18 +51,6 @@ class Reports(commands.Cog):
         if not member:
             return False
         return any(r.id == self.cfg.staff_role_id for r in member.roles)
-
-    async def _send_modlog(self, guild: discord.Guild, embed: discord.Embed):
-        cid = getattr(self.cfg, "modlogs_channel_id", 0) or 0
-        if cid <= 0:
-            return
-        ch = guild.get_channel(cid)
-        if not ch:
-            return
-        try:
-            await ch.send(embed=embed)
-        except discord.Forbidden:
-            pass
 
     async def _block_gate(self, interaction: discord.Interaction) -> bool:
         if not interaction.guild:
@@ -151,113 +141,62 @@ class Reports(commands.Cog):
         await interaction.followup.send(f"✅ Synced **{len(synced)}** commands.", ephemeral=True)
 
     @app_commands.command(
-        name="reportblock",
-        description="Block a user from using /report commands (staff only).",
+        name="reportreactivate",
+        description="Re-activate staff buttons for a report (reopens it to Open).",
     )
-    @app_commands.describe(
-        user="User to block",
-        duration_minutes="Minutes to block (leave empty for permanent)",
-        reason="Optional reason shown to the user",
-    )
-    async def reportblock(
-        self,
-        interaction: discord.Interaction,
-        user: discord.User,
-        duration_minutes: int | None = None,
-        reason: str | None = None,
-    ):
+    @app_commands.describe(report_id="The numeric report ID (e.g. 123)")
+    async def reportreactivate(self, interaction: discord.Interaction, report_id: int):
         if not interaction.guild:
             return await interaction.response.send_message("This must be used in a server.", ephemeral=True)
         if not self._is_staff(interaction):
             return await interaction.response.send_message("❌ Not allowed.", ephemeral=True)
 
-        self.db.block_user(
-            guild_id=interaction.guild.id,
-            user_id=user.id,
-            created_by=interaction.user.id,
-            duration_minutes=duration_minutes,
-            reason=(reason or "").strip(),
+        report = self.db.get_report_by_id(report_id)
+        if not report or report["guild_id"] != interaction.guild.id:
+            return await interaction.response.send_message("❌ Report not found.", ephemeral=True)
+
+        staff_message_id = report.get("staff_message_id")
+        if not staff_message_id:
+            return await interaction.response.send_message(
+                "❌ This report has no staff message linked (older report / missing staff message id).",
+                ephemeral=True,
+            )
+
+        staff_ch = interaction.guild.get_channel(self.cfg.staff_channel_id)
+        if not staff_ch:
+            return await interaction.response.send_message("❌ Staff channel not found.", ephemeral=True)
+
+        try:
+            staff_msg = await staff_ch.fetch_message(int(staff_message_id))
+        except Exception:
+            return await interaction.response.send_message("❌ Could not fetch the staff report message.", ephemeral=True)
+
+        # Reopen it to Open
+        self.db.update_status(report_id, "Open")
+        report["status"] = "Open"
+
+        # Build updated embed
+        try:
+            reporter = await interaction.client.fetch_user(report["reporter_id"])
+        except Exception:
+            reporter = interaction.client.get_user(report["reporter_id"]) or interaction.user
+
+        source = interaction.guild.get_channel(report["source_channel_id"]) or staff_ch
+
+        embed = build_staff_embed(
+            report["id"],
+            report["report_type"],
+            reporter,
+            source,
+            report["payload"],
+            "Open",
         )
 
-        # Modlog
-        embed = discord.Embed(title="Report system block", color=discord.Color.red())
-        embed.add_field(name="User", value=f"{user.mention} (`{user.id}`)", inline=False)
-        embed.add_field(name="By", value=f"{interaction.user.mention} (`{interaction.user.id}`)", inline=False)
+        # Attach a fresh view (buttons enabled)
+        view = ReportActionView(self.db, self.cfg.staff_channel_id, self.cfg.support_channel_id, self.cfg.public_updates)
 
-        if duration_minutes is None:
-            embed.add_field(name="Duration", value="Permanent", inline=False)
-        else:
-            # Pull expires_at for exact time from DB (so it matches what the bot will enforce)
-            blocked, is_perm, expires_at, _ = self.db.is_user_blocked(interaction.guild.id, user.id)
-            exp_txt = _iso_to_discord_ts(expires_at) if expires_at else "unknown"
-            embed.add_field(name="Duration", value=f"{duration_minutes} minutes (expires {exp_txt})", inline=False)
-
-        if reason and reason.strip():
-            embed.add_field(name="Reason", value=reason.strip(), inline=False)
-
-        await self._send_modlog(interaction.guild, embed)
-
-        if duration_minutes is None:
-            await interaction.response.send_message(f"✅ Blocked {user.mention} permanently.", ephemeral=True)
-        else:
-            await interaction.response.send_message(f"✅ Blocked {user.mention} for {duration_minutes} minutes.", ephemeral=True)
-
-    @app_commands.command(
-        name="reportunblock",
-        description="Remove a report-system block from a user (staff only).",
-    )
-    @app_commands.describe(user="User to unblock")
-    async def reportunblock(self, interaction: discord.Interaction, user: discord.User):
-        if not interaction.guild:
-            return await interaction.response.send_message("This must be used in a server.", ephemeral=True)
-        if not self._is_staff(interaction):
-            return await interaction.response.send_message("❌ Not allowed.", ephemeral=True)
-
-        removed = self.db.unblock_user(interaction.guild.id, user.id)
-
-        # Modlog
-        embed = discord.Embed(title="Report system unblock", color=discord.Color.green())
-        embed.add_field(name="User", value=f"{user.mention} (`{user.id}`)", inline=False)
-        embed.add_field(name="By", value=f"{interaction.user.mention} (`{interaction.user.id}`)", inline=False)
-        embed.add_field(name="Result", value="Unblocked" if removed else "User was not blocked", inline=False)
-        await self._send_modlog(interaction.guild, embed)
-
-        if removed:
-            await interaction.response.send_message(f"✅ Unblocked {user.mention}.", ephemeral=True)
-        else:
-            await interaction.response.send_message(f"ℹ️ {user.mention} wasn’t blocked.", ephemeral=True)
-
-    @app_commands.command(
-        name="reportblocks",
-        description="List users currently blocked from using the report system (staff only).",
-    )
-    async def reportblocks(self, interaction: discord.Interaction):
-        if not interaction.guild:
-            return await interaction.response.send_message("This must be used in a server.", ephemeral=True)
-        if not self._is_staff(interaction):
-            return await interaction.response.send_message("❌ Not allowed.", ephemeral=True)
-
-        blocks = self.db.list_blocks(interaction.guild.id)
-        if not blocks:
-            return await interaction.response.send_message("No blocked users right now.", ephemeral=True)
-
-        lines = []
-        for b in blocks[:20]:
-            user_id = b["user_id"]
-            if b["is_permanent"]:
-                status = "Permanent"
-            else:
-                status = f"Until {_iso_to_discord_ts(b['expires_at'])}" if b.get("expires_at") else "Temporary"
-            reason_txt = f" — {b['reason']}" if b.get("reason") else ""
-            lines.append(f"<@{user_id}> (`{user_id}`) — **{status}**{reason_txt}")
-
-        extra = f"\n…and {len(blocks) - 20} more." if len(blocks) > 20 else ""
-
-        embed = discord.Embed(
-            title=f"Blocked users ({len(blocks)})",
-            description="\n".join(lines) + extra,
-        )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await staff_msg.edit(embed=embed, view=view)
+        await interaction.response.send_message(f"✅ Re-activated buttons for report **#{report_id}**.", ephemeral=True)
 
 
 async def setup(bot):

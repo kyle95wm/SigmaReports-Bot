@@ -123,6 +123,34 @@ class ReportDB:
             "updated_at": row[9],
         }
 
+    # ✅ NEW: lookup by report id (needed to re-enable buttons)
+    def get_report_by_id(self, report_id: int) -> Optional[dict]:
+        with self._conn() as con:
+            row = con.execute(
+                """
+                SELECT id, report_type, reporter_id, guild_id, source_channel_id, staff_message_id, status, payload_json, created_at, updated_at
+                FROM reports
+                WHERE id = ?
+                """,
+                (report_id,),
+            ).fetchone()
+
+        if not row:
+            return None
+
+        return {
+            "id": row[0],
+            "report_type": row[1],
+            "reporter_id": row[2],
+            "guild_id": row[3],
+            "source_channel_id": row[4],
+            "staff_message_id": row[5],
+            "status": row[6],
+            "payload": json.loads(row[7]),
+            "created_at": row[8],
+            "updated_at": row[9],
+        }
+
     def update_status(self, report_id: int, status: str):
         now = _utcnow_iso()
         with self._conn() as con:
@@ -235,10 +263,6 @@ class ReportDB:
             return cur.rowcount > 0
 
     def list_blocks(self, guild_id: int) -> list[dict]:
-        """
-        Returns active (non-expired) blocks for this guild.
-        Each item: {user_id, is_permanent, expires_at, reason, created_by, created_at}
-        """
         with self._conn() as con:
             rows = con.execute(
                 """
@@ -257,7 +281,6 @@ class ReportDB:
             if not is_perm:
                 dt = _parse_iso(expires_at) if expires_at else None
                 if (dt is None) or (dt <= now):
-                    # expired -> remove it
                     self._cleanup_expired_block(guild_id, int(user_id))
                     continue
 
@@ -272,7 +295,6 @@ class ReportDB:
                 }
             )
 
-        # Permanent first, then soonest expiry
         def _sort_key(x: dict):
             if x["is_permanent"]:
                 return (0, 0)
