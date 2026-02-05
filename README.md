@@ -16,12 +16,14 @@ A Discord bot for handling TV and VOD issue reports using slash commands, modals
 ### 1. Clone the repo
 ```bash
 git clone https://github.com/yourname/discord-reports-bot.git
-cd discord-reports-bot```
+cd discord-reports-bot
+```
 
 
 ### 2. Create environment file
 ```bash
-cp .env.example .env```
+cp .env.example .env
+```
 
 
 Fill in your values.
@@ -30,6 +32,7 @@ Fill in your values.
 ### 3. Run with Docker
 
 ```bash
-docker compose up -d --build```
+docker compose up -d --build
+```
 
 
