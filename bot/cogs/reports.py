@@ -66,6 +66,42 @@ class Reports(commands.Cog):
             ephemeral=True,
         )
 
+    @app_commands.command(
+        name="synccommands",
+        description="Force re-sync slash commands for this server (owner only).",
+    )
+    @app_commands.describe(
+        cleanup="If true, clears global + server commands first (use only if duplicates happen)."
+    )
+    async def synccommands(self, interaction: discord.Interaction, cleanup: bool = False):
+        if interaction.user.id != REPORTPINGS_OWNER_ID:
+            return await interaction.response.send_message("❌ You are not allowed to use this command.", ephemeral=True)
+
+        if not interaction.guild:
+            return await interaction.response.send_message("This must be used in a server.", ephemeral=True)
+
+        guild = discord.Object(id=interaction.guild.id)
+
+        await interaction.response.send_message("Syncing commands…", ephemeral=True)
+
+        if cleanup:
+            # Clear ALL global commands registered in Discord
+            self.bot.tree.clear_commands(guild=None)
+            await self.bot.tree.sync()
+
+            # Clear ALL guild commands registered for this guild
+            self.bot.tree.clear_commands(guild=guild)
+            await self.bot.tree.sync(guild=guild)
+
+        # Force the guild set to match our current code-defined command tree
+        self.bot.tree.copy_global_to(guild=guild)
+        synced = await self.bot.tree.sync(guild=guild)
+
+        await interaction.followup.send(
+            f"✅ Synced **{len(synced)}** commands to this server." + (" (cleanup used)" if cleanup else ""),
+            ephemeral=True,
+        )
+
 
 async def setup(bot):
     await bot.add_cog(Reports(bot, bot.db, bot.cfg))
