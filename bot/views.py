@@ -1,184 +1,321 @@
 import discord
-from bot.db import ReportDB
+
 from bot.utils import build_staff_embed, report_subject, try_dm
 
 
-class StaffFollowUpModal(discord.ui.Modal, title="Send follow-up message"):
+class FollowUpModal(discord.ui.Modal, title="Send follow-up"):
     message = discord.ui.TextInput(
-        label="Message to send",
+        label="Follow-up message",
         style=discord.TextStyle.paragraph,
-        max_length=1000,
-        placeholder="Type the follow-up you want the reporter to receive...",
+        max_length=900,
+        required=True,
+        placeholder="Type the update you want the reporter to see…",
     )
 
-    def __init__(self, db: ReportDB, staff_message_id: int):
+    def __init__(self, view: "ReportActionView", report: dict):
         super().__init__()
-        self.db = db
-        self.staff_message_id = staff_message_id
+        self.view = view
+        self.report = report
 
     async def on_submit(self, interaction: discord.Interaction):
-        report = self.db.get_by_staff_message_id(self.staff_message_id)
-        if not report:
-            return await interaction.response.send_message("❌ Report not found.")
+        if not self.view.is_staff(interaction):
+            return await interaction.response.send_message("❌ Not allowed.", ephemeral=True)
 
-        if not interaction.guild:
-            return await interaction.response.send_message("❌ This must be used in a server.")
+        guild = interaction.guild
+        if not guild:
+            return await interaction.response.send_message("This must be used in a server.", ephemeral=True)
 
-        reporter = await interaction.client.fetch_user(report["reporter_id"])
-        source = interaction.guild.get_channel(report["source_channel_id"]) or interaction.channel
-        subject = report_subject(report["report_type"], report["payload"])
+        reporter_id = self.report["reporter_id"]
+        src_ch = guild.get_channel(self.report["source_channel_id"])
 
-        text = str(self.message).strip()
-        if not text:
-            return await interaction.response.send_message("❌ Follow-up message can’t be empty.")
+        subject = report_subject(self.report["report_type"], self.report["payload"])
+        user_msg = f"💬 Update on report **#{self.report['id']}** ({subject}):\n{self.message.value}"
 
-        # Public + DM follow-up
-        public_msg = f"💬 {reporter.mention} follow-up on report **#{report['id']}** (**{subject}**): {text}"
-        dm_msg = f"💬 Follow-up on your report #{report['id']} ({subject}): {text}"
-
-        # Public message
+        # DM if possible
         try:
-            if isinstance(source, discord.TextChannel):
-                await source.send(public_msg)
-        except discord.Forbidden:
+            reporter = await interaction.client.fetch_user(reporter_id)
+        except Exception:
+            reporter = interaction.client.get_user(reporter_id)
+
+        if reporter:
+            await try_dm(reporter, user_msg)
+
+        # Public ping (if enabled)
+        if self.view.public_updates and src_ch:
+            try:
+                await src_ch.send(f"<@{reporter_id}> {user_msg}")
+            except discord.Forbidden:
+                pass
+
+        await interaction.response.send_message("✅ Follow-up sent (does not close the report).", ephemeral=True)
+
+
+class BlockUserModal(discord.ui.Modal, title="Block user from reports"):
+    duration_minutes = discord.ui.TextInput(
+        label="Duration minutes (blank = permanent)",
+        required=False,
+        max_length=10,
+        placeholder="e.g. 60 (leave blank for permanent)",
+    )
+    reason = discord.ui.TextInput(
+        label="Reason (optional)",
+        required=False,
+        max_length=200,
+        placeholder="Spam / troll reports / abuse",
+    )
+
+    def __init__(self, view: "ReportActionView", report: dict):
+        super().__init__()
+        self.view = view
+        self.report = report
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not self.view.is_staff(interaction):
+            return await interaction.response.send_message("❌ Not allowed.", ephemeral=True)
+
+        guild = interaction.guild
+        if not guild:
+            return await interaction.response.send_message("This must be used in a server.", ephemeral=True)
+
+        raw = (self.duration_minutes.value or "").strip()
+        dur = None
+        if raw:
+            if not raw.isdigit():
+                return await interaction.response.send_message("Duration must be a number of minutes (or blank).", ephemeral=True)
+            dur = int(raw)
+
+        reason = (self.reason.value or "").strip()
+
+        # Apply the block
+        self.view.db.block_user(
+            guild_id=guild.id,
+            user_id=self.report["reporter_id"],
+            created_by=interaction.user.id,
+            duration_minutes=dur,
+            reason=reason,
+        )
+
+        # Build appeal message
+        support_ch = guild.get_channel(self.view.support_channel_id) if self.view.support_channel_id else None
+        support_mention = support_ch.mention if support_ch else "the support channel"
+
+        if dur is None:
+            base = f"🚫 You are blocked from using the report system. To appeal, open a ticket in {support_mention}."
+        else:
+            base = f"🚫 You are temporarily blocked from using the report system. To appeal, open a ticket in {support_mention}."
+
+        if reason:
+            base += f"\nReason: {reason}"
+
+        reporter_id = self.report["reporter_id"]
+        src_ch = guild.get_channel(self.report["source_channel_id"])
+
+        # DM reporter if possible
+        try:
+            reporter = await interaction.client.fetch_user(reporter_id)
+        except Exception:
+            reporter = interaction.client.get_user(reporter_id)
+
+        if reporter:
+            await try_dm(reporter, base)
+
+        # Public ping in the source channel (so they see it if DMs closed)
+        if src_ch:
+            try:
+                await src_ch.send(f"<@{reporter_id}> {base}")
+            except discord.Forbidden:
+                pass
+
+        # Update staff embed to reflect block (best-effort, won’t break if DB lacks method)
+        try:
+            staff_msg = interaction.message
+            updated = self.view._get_report_from_staff_message_id(staff_msg.id)
+            if updated:
+                embed = build_staff_embed(
+                    updated["id"],
+                    updated["report_type"],
+                    reporter or interaction.user,
+                    src_ch or interaction.channel,
+                    updated["payload"],
+                    updated["status"],
+                )
+                block_line = "Permanent" if dur is None else f"{dur} minutes"
+                extra = f"**Blocked:** {block_line}\n**By:** {interaction.user.mention}"
+                if reason:
+                    extra += f"\n**Reason:** {reason}"
+                embed.add_field(name="🚫 Report access", value=extra, inline=False)
+
+                await staff_msg.edit(embed=embed, view=self.view)
+        except Exception:
             pass
 
-        # DM (best-effort)
-        await try_dm(reporter, dm_msg)
-
-        # Acknowledge to staff
-        await interaction.response.send_message("✅ Follow-up sent.")
+        await interaction.response.send_message("✅ Block applied.", ephemeral=True)
 
 
 class ReportActionView(discord.ui.View):
-    def __init__(self, db: ReportDB, staff_channel_id: int, support_channel_id: int, public_updates: bool):
+    def __init__(self, db, staff_channel_id: int, support_channel_id: int, public_updates: bool, cfg=None):
         super().__init__(timeout=None)
         self.db = db
         self.staff_channel_id = staff_channel_id
         self.support_channel_id = support_channel_id
+        self.public_updates = public_updates
+        self.cfg = cfg  # optional; used for staff role ID if present
 
-    @discord.ui.button(label="Fixed", style=discord.ButtonStyle.success, custom_id="report:fixed")
-    async def fixed(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self._handle_status(interaction, button, "Fixed")
+    def is_staff(self, interaction: discord.Interaction) -> bool:
+        member = interaction.user if isinstance(interaction.user, discord.Member) else None
+        if not member:
+            return False
 
-    @discord.ui.button(label="Can't replicate", style=discord.ButtonStyle.secondary, custom_id="report:cant")
-    async def cant(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self._handle_status(interaction, button, "Can't replicate")
+        # Prefer role-based staff gating if cfg.staff_role_id exists
+        staff_role_id = getattr(self.cfg, "staff_role_id", 0) if self.cfg else 0
+        if staff_role_id:
+            return any(r.id == staff_role_id for r in member.roles)
 
-    @discord.ui.button(label="More info required", style=discord.ButtonStyle.primary, custom_id="report:more_info")
-    async def more_info(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self._handle_status(interaction, button, "More info required")
+        # Fallback: admin/manage guild
+        perms = member.guild_permissions
+        return perms.administrator or perms.manage_guild
 
-    @discord.ui.button(label="Send follow-up", style=discord.ButtonStyle.secondary, custom_id="report:followup")
-    async def follow_up(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # Keep follow-up limited to staff channel
-        if not interaction.guild or not interaction.channel:
-            return await interaction.response.send_message("❌ This can only be used in a server.")
+    def _get_report_from_staff_message_id(self, staff_message_id: int):
+        # Supports either db.get_by_staff_message_id or db.get_report_by_staff_message_id if you named it differently
+        if hasattr(self.db, "get_by_staff_message_id"):
+            return self.db.get_by_staff_message_id(staff_message_id)
+        if hasattr(self.db, "get_report_by_staff_message_id"):
+            return self.db.get_report_by_staff_message_id(staff_message_id)
+        return None
 
-        if self.staff_channel_id and interaction.channel.id != self.staff_channel_id:
-            return await interaction.response.send_message("❌ Use this in the staff reports channel.")
+    def _update_status(self, report_id: int, status: str):
+        if hasattr(self.db, "update_status"):
+            return self.db.update_status(report_id, status)
+        if hasattr(self.db, "set_status"):
+            return self.db.set_status(report_id, status)
+        raise RuntimeError("DB has no update_status/set_status method")
 
-        if not interaction.message:
-            return await interaction.response.send_message("❌ Couldn’t read the report message.")
+    async def _notify_reporter(self, interaction: discord.Interaction, report: dict, new_status: str):
+        guild = interaction.guild
+        if not guild:
+            return
 
-        # Open modal to type the follow-up message
-        await interaction.response.send_modal(StaffFollowUpModal(self.db, interaction.message.id))
+        reporter_id = report["reporter_id"]
+        src_ch = guild.get_channel(report["source_channel_id"])
+        support_ch = guild.get_channel(self.support_channel_id) if self.support_channel_id else None
+        support_mention = support_ch.mention if support_ch else "the support channel"
 
-    async def _handle_status(self, interaction: discord.Interaction, button: discord.ui.Button, status: str):
-        # Keep buttons limited to staff channel
-        if not interaction.guild or not interaction.channel:
-            return await interaction.response.send_message("❌ This can only be used in a server.")
-
-        if self.staff_channel_id and interaction.channel.id != self.staff_channel_id:
-            return await interaction.response.send_message("❌ Use staff buttons in the staff reports channel.")
-
-        if not interaction.message:
-            return await interaction.response.send_message("❌ Couldn’t read the report message.")
-
-        report = self.db.get_by_staff_message_id(interaction.message.id)
-        if not report:
-            return await interaction.response.send_message("❌ Report not found.")
-
-        self.db.update_status(report["id"], status)
-
-        reporter = await interaction.client.fetch_user(report["reporter_id"])
-        source = interaction.guild.get_channel(report["source_channel_id"]) or interaction.channel
         subject = report_subject(report["report_type"], report["payload"])
 
-        # Update staff embed
+        if new_status == "Fixed":
+            msg = f"✅ Update on your report **#{report['id']}** ({subject}): **Fixed**."
+        elif "Can't replicate" in new_status or "Cant replicate" in new_status:
+            msg = (
+                f"⚠️ Update on your report **#{report['id']}** ({subject}): **We are unable to replicate the issue**.\n"
+                f"Please open a ticket in {support_mention} so we can assist further."
+            )
+        else:
+            msg = f"📝 Update on your report **#{report['id']}** ({subject}): **More info required**.\nPlease re-submit your report with more details."
+
+        # DM
+        try:
+            reporter = await interaction.client.fetch_user(reporter_id)
+        except Exception:
+            reporter = interaction.client.get_user(reporter_id)
+
+        if reporter:
+            await try_dm(reporter, msg)
+
+        # Public ping
+        if self.public_updates and src_ch:
+            try:
+                await src_ch.send(f"<@{reporter_id}> {msg}")
+            except discord.Forbidden:
+                pass
+
+    async def _refresh_staff_embed(self, interaction: discord.Interaction, report: dict):
+        guild = interaction.guild
+        src_ch = guild.get_channel(report["source_channel_id"]) if guild else None
+
+        # best effort for reporter object (embed only)
+        try:
+            reporter = await interaction.client.fetch_user(report["reporter_id"])
+        except Exception:
+            reporter = interaction.client.get_user(report["reporter_id"]) or interaction.user
+
         embed = build_staff_embed(
             report["id"],
             report["report_type"],
             reporter,
-            source,
+            src_ch or interaction.channel,
             report["payload"],
-            status,
+            report["status"],
         )
+        await interaction.message.edit(embed=embed, view=self)
 
-        # Disable ONLY the three status buttons after one status is chosen
-        for child in self.children:
-            if isinstance(child, discord.ui.Button) and child.custom_id in (
-                "report:fixed",
-                "report:cant",
-                "report:more_info",
-            ):
-                child.disabled = True
+    # -------- Buttons --------
 
-        await interaction.response.edit_message(embed=embed, view=self)
+    @discord.ui.button(label="Fixed", style=discord.ButtonStyle.success, emoji="✅", custom_id="report:fixed")
+    async def fixed(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not self.is_staff(interaction):
+            return await interaction.response.send_message("❌ Not allowed.", ephemeral=True)
 
-        # Emoji per status
-        if status == "Fixed":
-            emoji = "✅"
-        elif status == "Can't replicate":
-            emoji = "⚠️"
-        elif status == "More info required":
-            emoji = "📝"
-        else:
-            emoji = "🔔"
+        report = self._get_report_from_staff_message_id(interaction.message.id)
+        if not report:
+            return await interaction.response.send_message("Could not find report for this message.", ephemeral=True)
 
-        public_update = f"{emoji} {reporter.mention} update on report **#{report['id']}** (**{subject}**): **{status}**."
-        dm_update = f"{emoji} Update on your report #{report['id']} ({subject}): {status}."
+        self._update_status(report["id"], "Fixed")
+        report["status"] = "Fixed"
 
-        # Public + DM update
-        try:
-            if isinstance(source, discord.TextChannel):
-                await source.send(public_update)
-        except discord.Forbidden:
-            pass
+        await self._notify_reporter(interaction, report, "Fixed")
+        await self._refresh_staff_embed(interaction, report)
+        await interaction.response.send_message("✅ Marked as Fixed.", ephemeral=True)
 
-        await try_dm(reporter, dm_update)
+    @discord.ui.button(label="Can't replicate", style=discord.ButtonStyle.secondary, emoji="⚠️", custom_id="report:cantrep")
+    async def cantrep(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not self.is_staff(interaction):
+            return await interaction.response.send_message("❌ Not allowed.", ephemeral=True)
 
-        # Can't replicate flow
-        if status == "Can't replicate":
-            support = interaction.guild.get_channel(self.support_channel_id) if self.support_channel_id else None
-            if support:
-                msg = f"⚠️ We are unable to replicate the issue. Please open a ticket in {support.mention} so we can assist further."
-            else:
-                msg = "⚠️ We are unable to replicate the issue. Please open a ticket in the ticket channel so we can assist further."
+        report = self._get_report_from_staff_message_id(interaction.message.id)
+        if not report:
+            return await interaction.response.send_message("Could not find report for this message.", ephemeral=True)
 
-            try:
-                if isinstance(source, discord.TextChannel):
-                    await source.send(f"{reporter.mention} {msg}")
-            except discord.Forbidden:
-                pass
+        self._update_status(report["id"], "Can't replicate")
+        report["status"] = "Can't replicate"
 
-            await try_dm(reporter, msg)
+        await self._notify_reporter(interaction, report, "Can't replicate")
+        await self._refresh_staff_embed(interaction, report)
+        await interaction.response.send_message("✅ Marked as Can't replicate.", ephemeral=True)
 
-        # More info required flow
-        if status == "More info required":
-            msg = (
-                f"📝 We need more information for **report #{report['id']}** (**{subject}**).\n"
-                f"Please re-submit your report with more details, such as:\n"
-                f"• what you expected vs what happened\n"
-                f"• when it occurred\n"
-                f"• device/app used\n"
-                f"• any error messages"
-            )
+    @discord.ui.button(label="More info required", style=discord.ButtonStyle.primary, emoji="📝", custom_id="report:moreinfo")
+    async def moreinfo(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not self.is_staff(interaction):
+            return await interaction.response.send_message("❌ Not allowed.", ephemeral=True)
 
-            try:
-                if isinstance(source, discord.TextChannel):
-                    await source.send(f"{reporter.mention} {msg}")
-            except discord.Forbidden:
-                pass
+        report = self._get_report_from_staff_message_id(interaction.message.id)
+        if not report:
+            return await interaction.response.send_message("Could not find report for this message.", ephemeral=True)
 
-            await try_dm(reporter, msg)
+        self._update_status(report["id"], "More info required")
+        report["status"] = "More info required"
+
+        await self._notify_reporter(interaction, report, "More info required")
+        await self._refresh_staff_embed(interaction, report)
+        await interaction.response.send_message("✅ Requested more info.", ephemeral=True)
+
+    @discord.ui.button(label="Send follow-up", style=discord.ButtonStyle.secondary, emoji="💬", custom_id="report:followup")
+    async def followup(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not self.is_staff(interaction):
+            return await interaction.response.send_message("❌ Not allowed.", ephemeral=True)
+
+        report = self._get_report_from_staff_message_id(interaction.message.id)
+        if not report:
+            return await interaction.response.send_message("Could not find report for this message.", ephemeral=True)
+
+        await interaction.response.send_modal(FollowUpModal(self, report))
+
+    @discord.ui.button(label="Block user", style=discord.ButtonStyle.danger, emoji="🚫", custom_id="report:blockuser")
+    async def blockuser(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not self.is_staff(interaction):
+            return await interaction.response.send_message("❌ Not allowed.", ephemeral=True)
+
+        report = self._get_report_from_staff_message_id(interaction.message.id)
+        if not report:
+            return await interaction.response.send_message("Could not find report for this message.", ephemeral=True)
+
+        await interaction.response.send_modal(BlockUserModal(self, report))

@@ -63,6 +63,7 @@ class SigmaReportsBot(commands.Bot):
                 self.cfg.staff_channel_id,
                 self.cfg.support_channel_id,
                 self.cfg.public_updates,
+                cfg=self.cfg,
             )
         )
 
