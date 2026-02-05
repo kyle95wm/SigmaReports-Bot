@@ -1,10 +1,10 @@
 import discord
+from discord import app_commands
 from discord.ext import commands
 
 from bot.modals import TVReportModal, VODReportModal
 
-
-# 🔒 Only this user can run /reportpings
+# Owner-only for /reportpings
 REPORTPINGS_OWNER_ID = 1229271933736976395
 
 
@@ -14,20 +14,27 @@ class Reports(commands.Cog):
         self.db = db
         self.cfg = cfg
 
+    # ---- helpers ----
+
     def _allowed_channel(self, interaction: discord.Interaction) -> bool:
+        # cfg.reports_channel_ids is your comma-list env var
         return bool(interaction.channel) and interaction.channel.id in set(self.cfg.reports_channel_ids)
 
     def _allowed_channels_hint(self, interaction: discord.Interaction) -> str:
         if not interaction.guild:
             return "the allowed channels"
+
         mentions = []
         for cid in self.cfg.reports_channel_ids:
             ch = interaction.guild.get_channel(cid)
             if ch:
                 mentions.append(ch.mention)
+
         return ", ".join(mentions) if mentions else "the allowed channels"
 
-    @discord.app_commands.command(
+    # ---- slash commands ----
+
+    @app_commands.command(
         name="report-tv",
         description="Report an issue with a live TV channel (buffering, offline, wrong content, etc.)",
     )
@@ -39,7 +46,7 @@ class Reports(commands.Cog):
 
         await interaction.response.send_modal(TVReportModal(self.db, self.cfg))
 
-    @discord.app_commands.command(
+    @app_commands.command(
         name="report-vod",
         description="Report an issue with a movie or TV show (playback, missing episodes, quality issues, etc.)",
     )
@@ -51,7 +58,7 @@ class Reports(commands.Cog):
 
         await interaction.response.send_modal(VODReportModal(self.db, self.cfg))
 
-    @discord.app_commands.command(
+    @app_commands.command(
         name="reportpings",
         description="Toggle staff pings for new reports (owner only).",
     )
