@@ -27,7 +27,6 @@ class ReportDB:
 
     def _init(self):
         with self._conn() as con:
-            # Reports table (existing)
             con.execute(
                 """
                 CREATE TABLE IF NOT EXISTS reports (
@@ -46,7 +45,6 @@ class ReportDB:
             )
             con.execute("CREATE INDEX IF NOT EXISTS idx_reports_staff_msg ON reports(staff_message_id)")
 
-            # Bot settings (existing)
             con.execute(
                 """
                 CREATE TABLE IF NOT EXISTS bot_settings (
@@ -59,7 +57,7 @@ class ReportDB:
                 "INSERT OR IGNORE INTO bot_settings (key, value) VALUES ('report_pings_enabled', '1')"
             )
 
-            # ✅ NEW: user blocks (per guild)
+            # Blocks
             con.execute(
                 """
                 CREATE TABLE IF NOT EXISTS user_blocks (
@@ -75,7 +73,6 @@ class ReportDB:
                 """
             )
             con.execute("CREATE INDEX IF NOT EXISTS idx_user_blocks_expires ON user_blocks(expires_at)")
-
             con.commit()
 
     # ---------------- reports ----------------
@@ -102,13 +99,41 @@ class ReportDB:
             )
             con.commit()
 
-    def get_report_pings_enabled(self) -> bool:
-        return self.get_setting("report_pings_enabled", "1") == "1"
+    def get_by_staff_message_id(self, staff_message_id: int) -> Optional[dict]:
+        with self._conn() as con:
+            row = con.execute(
+                """
+                SELECT id, report_type, reporter_id, guild_id, source_channel_id, staff_message_id, status, payload_json, created_at, updated_at
+                FROM reports
+                WHERE staff_message_id = ?
+                """,
+                (staff_message_id,),
+            ).fetchone()
 
-    def toggle_report_pings(self) -> bool:
-        new_val = "0" if self.get_report_pings_enabled() else "1"
-        self.set_setting("report_pings_enabled", new_val)
-        return new_val == "1"
+        if not row:
+            return None
+
+        return {
+            "id": row[0],
+            "report_type": row[1],
+            "reporter_id": row[2],
+            "guild_id": row[3],
+            "source_channel_id": row[4],
+            "staff_message_id": row[5],
+            "status": row[6],
+            "payload": json.loads(row[7]),
+            "created_at": row[8],
+            "updated_at": row[9],
+        }
+
+    def update_status(self, report_id: int, status: str):
+        now = _utcnow_iso()
+        with self._conn() as con:
+            con.execute(
+                "UPDATE reports SET status = ?, updated_at = ? WHERE id = ?",
+                (status, now, report_id),
+            )
+            con.commit()
 
     # ---------------- settings ----------------
 
@@ -126,10 +151,17 @@ class ReportDB:
             )
             con.commit()
 
+    def get_report_pings_enabled(self) -> bool:
+        return self.get_setting("report_pings_enabled", "1") == "1"
+
+    def toggle_report_pings(self) -> bool:
+        new_val = "0" if self.get_report_pings_enabled() else "1"
+        self.set_setting("report_pings_enabled", new_val)
+        return new_val == "1"
+
     # ---------------- blocks ----------------
 
     def _cleanup_expired_block(self, guild_id: int, user_id: int):
-        """Remove expired temp blocks automatically."""
         with self._conn() as con:
             row = con.execute(
                 "SELECT is_permanent, expires_at FROM user_blocks WHERE guild_id = ? AND user_id = ?",
@@ -153,9 +185,6 @@ class ReportDB:
                 con.commit()
 
     def is_user_blocked(self, guild_id: int, user_id: int) -> tuple[bool, bool, Optional[str], Optional[str]]:
-        """
-        Returns: (blocked, is_permanent, expires_at_iso, reason)
-        """
         self._cleanup_expired_block(guild_id, user_id)
 
         with self._conn() as con:
@@ -177,10 +206,6 @@ class ReportDB:
         duration_minutes: Optional[int],
         reason: str,
     ):
-        """
-        duration_minutes=None => permanent
-        duration_minutes=int => temp
-        """
         now = _utcnow_iso()
         is_perm = 1 if duration_minutes is None else 0
         expires_at = None
