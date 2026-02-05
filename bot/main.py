@@ -1,5 +1,4 @@
 import asyncio
-import os
 import random
 from typing import Optional
 
@@ -46,7 +45,6 @@ LOCAL_CHANNELS = [
 class SigmaReportsBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
-        # message_content intent is NOT required for slash commands
         super().__init__(command_prefix="!", intents=intents)
 
         self.cfg = load_config()
@@ -66,55 +64,43 @@ class SigmaReportsBot(commands.Bot):
             )
         )
 
+        # Load cogs
+        await self.load_extension("bot.cogs.reports")
+
+        # Guild sync (your server)
+        # If you later want to support multiple guilds, move this to /synccommands only.
         guild_id = 1457559352717086917
         guild = discord.Object(id=guild_id)
 
-        # ---- Optional one-time cleanup for duplicate commands ----
-        # If you've ever synced globally and then guild-synced, Discord can show duplicates.
-        # Set CLEAN_DUPLICATE_COMMANDS=1 in .env, deploy once, then set it back to 0.
-        if os.getenv("CLEAN_DUPLICATE_COMMANDS", "0").strip() == "1":
-            print("CLEAN_DUPLICATE_COMMANDS=1 -> clearing global + guild commands...")
-
-            # Clear ALL global commands currently registered (in Discord)
-            self.tree.clear_commands(guild=None)
-            await self.tree.sync()
-            print("Cleared global commands.")
-
-            # Clear ALL guild commands currently registered for this guild
-            self.tree.clear_commands(guild=guild)
-            await self.tree.sync(guild=guild)
-            print(f"Cleared guild commands for {guild_id}.")
-
-        # Load cogs (registers slash commands into the tree)
-        await self.load_extension("bot.cogs.reports")
-
-        # Helpful debug line
-        print("Tree before sync:", [c.name for c in self.tree.get_commands()])
-
-        # ✅ Ensure guild commands match our current tree (helps when Discord gets 'stuck')
-        self.tree.copy_global_to(guild=guild)
         synced = await self.tree.sync(guild=guild)
         print(f"Synced {len(synced)} commands to guild {guild_id}")
-
-        # Start rotating presence
-        self._presence_task = asyncio.create_task(self._presence_rotator())
 
     async def on_ready(self):
         print(f"Logged in as {self.user} (ID: {self.user.id})")
 
+        # Start presence rotator once (on_ready can fire more than once)
+        if self._presence_task is None or self._presence_task.done():
+            self._presence_task = asyncio.create_task(self._presence_rotator())
+
     # ---------------- Presence rotation (5 min) ----------------
 
     async def _presence_rotator(self):
-        # Refresh TMDB cache on startup
-        await self._refresh_tmdb_cache()
+        # Ensure we're connected + ready before trying to set presence
+        await self.wait_until_ready()
 
-        # Then run every 5 minutes; refresh TMDB every 6 hours
+        # Prime TMDB cache once
+        try:
+            await self._refresh_tmdb_cache()
+        except Exception as e:
+            print("Presence: TMDB refresh failed:", repr(e))
+
         ticks = 0
         while not self.is_closed():
             try:
                 await self._set_random_presence()
-            except Exception:
-                pass
+            except Exception as e:
+                # IMPORTANT: don't swallow this silently
+                print("Presence: change_presence failed:", repr(e))
 
             await asyncio.sleep(300)  # 5 minutes
             ticks += 1
@@ -123,8 +109,8 @@ class SigmaReportsBot(commands.Bot):
             if ticks % 72 == 0:
                 try:
                     await self._refresh_tmdb_cache()
-                except Exception:
-                    pass
+                except Exception as e:
+                    print("Presence: TMDB refresh failed:", repr(e))
 
     def _build_status_pool(self) -> list[str]:
         pool: list[str] = []
@@ -136,16 +122,25 @@ class SigmaReportsBot(commands.Bot):
     async def _set_random_presence(self):
         pool = self._build_status_pool()
         if not pool:
+            print("Presence: status pool empty (nothing to display).")
             return
 
         choice = random.choice(pool)
         activity = discord.Activity(type=discord.ActivityType.watching, name=choice)
-        await self.change_presence(activity=activity)
+
+        # Explicitly set status online too
+        await self.change_presence(status=discord.Status.online, activity=activity)
+        print(f"Presence set: Watching {choice}")
 
     async def _refresh_tmdb_cache(self):
         token = getattr(self.cfg, "tmdb_bearer_token", "") or ""
-        if not token or aiohttp is None:
+        if not token:
             self._tmdb_cache = []
+            print("Presence: TMDB token missing; skipping TMDB titles.")
+            return
+        if aiohttp is None:
+            self._tmdb_cache = []
+            print("Presence: aiohttp missing; install aiohttp to use TMDB titles.")
             return
 
         headers = {
@@ -161,29 +156,27 @@ class SigmaReportsBot(commands.Bot):
         titles: list[str] = []
         async with aiohttp.ClientSession(headers=headers) as session:
             for url in urls:
-                try:
-                    async with session.get(url, timeout=15) as resp:
-                        if resp.status != 200:
-                            continue
-                        data = await resp.json()
-                        for item in data.get("results", [])[:25]:
-                            name = item.get("title") or item.get("name")
-                            if name:
-                                titles.append(name)
-                except Exception:
-                    continue
+                async with session.get(url, timeout=15) as resp:
+                    if resp.status != 200:
+                        raise RuntimeError(f"TMDB HTTP {resp.status} for {url}")
+                    data = await resp.json()
+                    for item in data.get("results", [])[:25]:
+                        name = item.get("title") or item.get("name")
+                        if name:
+                            titles.append(name)
 
-        # Dedup + cap size
+        # Dedup
         deduped: list[str] = []
         seen = set()
         for t in titles:
-            key = t.lower()
-            if key in seen:
+            k = t.lower()
+            if k in seen:
                 continue
-            seen.add(key)
+            seen.add(k)
             deduped.append(t)
 
         self._tmdb_cache = deduped[:50]
+        print(f"Presence: refreshed TMDB cache ({len(self._tmdb_cache)} titles).")
 
 
 def main():
