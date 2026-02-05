@@ -64,8 +64,9 @@ class SigmaReportsBot(commands.Bot):
 
         # Load cogs (registers app commands)
         await self.load_extension("bot.cogs.reports")
+        await self.load_extension("bot.cogs.moderation")
 
-        # ✅ Guild sync for fast command availability
+        # Guild sync for fast command availability
         guild_id = 1457559352717086917
         guild = discord.Object(id=guild_id)
 
