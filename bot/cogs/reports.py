@@ -4,7 +4,7 @@ from discord.ext import commands
 
 from bot.modals import TVReportModal, VODReportModal
 
-REPORTPINGS_OWNER_ID = 1229271933736976395
+OWNER_ID = 1229271933736976395
 
 
 class Reports(commands.Cog):
@@ -12,6 +12,8 @@ class Reports(commands.Cog):
         self.bot = bot
         self.db = db
         self.cfg = cfg
+
+    # ---------- helpers ----------
 
     def _allowed_channel(self, interaction: discord.Interaction) -> bool:
         return bool(interaction.channel) and interaction.channel.id in set(self.cfg.reports_channel_ids)
@@ -26,6 +28,47 @@ class Reports(commands.Cog):
                 mentions.append(ch.mention)
         return ", ".join(mentions) if mentions else "the allowed channels"
 
+    def _support_channel_mention(self, interaction: discord.Interaction) -> str:
+        if not interaction.guild or not self.cfg.support_channel_id:
+            return "the support channel"
+        ch = interaction.guild.get_channel(self.cfg.support_channel_id)
+        return ch.mention if ch else "the support channel"
+
+    def _is_staff(self, interaction: discord.Interaction) -> bool:
+        member = interaction.user if isinstance(interaction.user, discord.Member) else None
+        if not member:
+            return False
+        return any(r.id == self.cfg.staff_role_id for r in member.roles)
+
+    async def _block_gate(self, interaction: discord.Interaction) -> bool:
+        """Return True if user is allowed, otherwise send appeal message and return False."""
+        if not interaction.guild:
+            return True
+
+        blocked, is_perm, expires_at, reason = self.db.is_user_blocked(interaction.guild.id, interaction.user.id)
+        if not blocked:
+            return True
+
+        support = self._support_channel_mention(interaction)
+        reason_txt = f"\nReason: {reason}" if reason else ""
+
+        if is_perm:
+            msg = (
+                f"🚫 {interaction.user.mention} you are blocked from using the report system.\n"
+                f"To appeal, please open a ticket in {support}.{reason_txt}"
+            )
+        else:
+            exp = f"\nBlock expires: {expires_at}" if expires_at else ""
+            msg = (
+                f"🚫 {interaction.user.mention} you are temporarily blocked from using the report system."
+                f"{exp}\nTo appeal, please open a ticket in {support}.{reason_txt}"
+            )
+
+        await interaction.response.send_message(msg)
+        return False
+
+    # ---------- user report commands ----------
+
     @app_commands.command(
         name="report-tv",
         description="Report an issue with a live TV channel (buffering, offline, wrong content, etc.)",
@@ -35,6 +78,8 @@ class Reports(commands.Cog):
             return await interaction.response.send_message(
                 f"Use this command in: {self._allowed_channels_hint(interaction)}."
             )
+        if not await self._block_gate(interaction):
+            return
         await interaction.response.send_modal(TVReportModal(self.db, self.cfg))
 
     @app_commands.command(
@@ -46,18 +91,19 @@ class Reports(commands.Cog):
             return await interaction.response.send_message(
                 f"Use this command in: {self._allowed_channels_hint(interaction)}."
             )
+        if not await self._block_gate(interaction):
+            return
         await interaction.response.send_modal(VODReportModal(self.db, self.cfg))
+
+    # ---------- owner-only debug ----------
 
     @app_commands.command(
         name="reportpings",
         description="Toggle staff pings for new reports (owner only).",
     )
     async def reportpings(self, interaction: discord.Interaction):
-        if interaction.user.id != REPORTPINGS_OWNER_ID:
-            return await interaction.response.send_message(
-                "❌ You are not allowed to use this command.",
-                ephemeral=True,
-            )
+        if interaction.user.id != OWNER_ID:
+            return await interaction.response.send_message("❌ Not allowed.", ephemeral=True)
 
         enabled = self.db.toggle_report_pings()
         state = "ON 🔔" if enabled else "OFF 🔕"
@@ -74,33 +120,78 @@ class Reports(commands.Cog):
         cleanup="If true, clears global + server commands first (use only if duplicates happen)."
     )
     async def synccommands(self, interaction: discord.Interaction, cleanup: bool = False):
-        if interaction.user.id != REPORTPINGS_OWNER_ID:
-            return await interaction.response.send_message("❌ You are not allowed to use this command.", ephemeral=True)
-
+        if interaction.user.id != OWNER_ID:
+            return await interaction.response.send_message("❌ Not allowed.", ephemeral=True)
         if not interaction.guild:
             return await interaction.response.send_message("This must be used in a server.", ephemeral=True)
 
         guild = discord.Object(id=interaction.guild.id)
-
         await interaction.response.send_message("Syncing commands…", ephemeral=True)
 
         if cleanup:
-            # Clear ALL global commands registered in Discord
             self.bot.tree.clear_commands(guild=None)
             await self.bot.tree.sync()
-
-            # Clear ALL guild commands registered for this guild
             self.bot.tree.clear_commands(guild=guild)
             await self.bot.tree.sync(guild=guild)
 
-        # Force the guild set to match our current code-defined command tree
         self.bot.tree.copy_global_to(guild=guild)
         synced = await self.bot.tree.sync(guild=guild)
+        await interaction.followup.send(f"✅ Synced **{len(synced)}** commands.", ephemeral=True)
 
-        await interaction.followup.send(
-            f"✅ Synced **{len(synced)}** commands to this server." + (" (cleanup used)" if cleanup else ""),
-            ephemeral=True,
+    # ---------- staff block management ----------
+
+    @app_commands.command(
+        name="reportblock",
+        description="Block a user from using /report commands (staff only).",
+    )
+    @app_commands.describe(
+        user="User to block",
+        duration_minutes="Minutes to block (leave empty for permanent)",
+        reason="Optional reason shown to the user",
+    )
+    async def reportblock(
+        self,
+        interaction: discord.Interaction,
+        user: discord.User,
+        duration_minutes: int | None = None,
+        reason: str | None = None,
+    ):
+        if not interaction.guild:
+            return await interaction.response.send_message("This must be used in a server.", ephemeral=True)
+        if not self._is_staff(interaction):
+            return await interaction.response.send_message("❌ Not allowed.", ephemeral=True)
+
+        self.db.block_user(
+            guild_id=interaction.guild.id,
+            user_id=user.id,
+            created_by=interaction.user.id,
+            duration_minutes=duration_minutes,
+            reason=(reason or "").strip(),
         )
+
+        if duration_minutes is None:
+            await interaction.response.send_message(f"✅ Blocked {user.mention} permanently.", ephemeral=True)
+        else:
+            await interaction.response.send_message(
+                f"✅ Blocked {user.mention} for {duration_minutes} minutes.", ephemeral=True
+            )
+
+    @app_commands.command(
+        name="reportunblock",
+        description="Remove a report-system block from a user (staff only).",
+    )
+    @app_commands.describe(user="User to unblock")
+    async def reportunblock(self, interaction: discord.Interaction, user: discord.User):
+        if not interaction.guild:
+            return await interaction.response.send_message("This must be used in a server.", ephemeral=True)
+        if not self._is_staff(interaction):
+            return await interaction.response.send_message("❌ Not allowed.", ephemeral=True)
+
+        removed = self.db.unblock_user(interaction.guild.id, user.id)
+        if removed:
+            await interaction.response.send_message(f"✅ Unblocked {user.mention}.", ephemeral=True)
+        else:
+            await interaction.response.send_message(f"ℹ️ {user.mention} wasn’t blocked.", ephemeral=True)
 
 
 async def setup(bot):
