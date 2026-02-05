@@ -47,17 +47,21 @@ This should be the **TMDB API Read Access Token (v4)**.
 ## Setup
 
 ### 1. Clone the repo
+```bash 
 git clone https://github.com/yourname/discord-reports-bot.git
 cd discord-reports-bot
+```
 
 ### 2. Create environment file
+```bash 
 cp .env.example .env
-
+```
 Fill in your values (Discord token, channel IDs, optional TMDB token).
 
 ### 3. Run with Docker
+```bash 
 docker compose up -d --build
-
+```
 ## Notes
 - Do **not** commit your `.env`
 - Runtime data is stored in `./data` via Docker volume
