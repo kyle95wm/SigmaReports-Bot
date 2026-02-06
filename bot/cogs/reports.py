@@ -4,7 +4,8 @@ from discord.ext import commands
 from datetime import datetime, timezone
 
 from bot.modals import TVReportModal, VODReportModal
-from bot.views import ReportPanelView
+from bot.views import ReportActionView
+from bot.utils import build_staff_embed
 
 OWNER_ID = 1229271933736976395
 
@@ -140,39 +141,62 @@ class Reports(commands.Cog):
         await interaction.followup.send(f"✅ Synced **{len(synced)}** commands.", ephemeral=True)
 
     @app_commands.command(
-        name="reportpanel",
-        description="Post a report panel embed with buttons (staff only).",
+        name="reportreactivate",
+        description="Re-activate staff buttons for a report (reopens it to Open).",
     )
-    @app_commands.describe(channel="Channel to post the report panel in")
-    async def reportpanel(self, interaction: discord.Interaction, channel: discord.TextChannel):
+    @app_commands.describe(report_id="The numeric report ID (e.g. 123)")
+    async def reportreactivate(self, interaction: discord.Interaction, report_id: int):
         if not interaction.guild:
             return await interaction.response.send_message("This must be used in a server.", ephemeral=True)
         if not self._is_staff(interaction):
             return await interaction.response.send_message("❌ Not allowed.", ephemeral=True)
 
-        # Nice panel embed
-        embed = discord.Embed(
-            title="Report an Issue",
-            description=(
-                "Use the buttons below to submit a report.\n\n"
-                "**📺 Live TV** — buffering, offline channels, wrong content\n"
-                "**🎬 Movies / TV Shows** — playback issues, missing episodes, quality problems\n\n"
-                "Please include as much detail as possible so staff can investigate faster."
-            ),
-        )
-        embed.set_footer(text="Reports are reviewed by staff — you may receive updates in this channel and/or via DM.")
+        report = self.db.get_report_by_id(report_id)
+        if not report or report["guild_id"] != interaction.guild.id:
+            return await interaction.response.send_message("❌ Report not found.", ephemeral=True)
 
-        view = ReportPanelView(self.db, self.cfg)
-
-        try:
-            await channel.send(embed=embed, view=view)
-        except discord.Forbidden:
+        staff_message_id = report.get("staff_message_id")
+        if not staff_message_id:
             return await interaction.response.send_message(
-                "❌ I don’t have permission to post in that channel.",
+                "❌ This report has no staff message linked (older report / missing staff message id).",
                 ephemeral=True,
             )
 
-        await interaction.response.send_message(f"✅ Posted a report panel in {channel.mention}.", ephemeral=True)
+        staff_ch = interaction.guild.get_channel(self.cfg.staff_channel_id)
+        if not staff_ch:
+            return await interaction.response.send_message("❌ Staff channel not found.", ephemeral=True)
+
+        try:
+            staff_msg = await staff_ch.fetch_message(int(staff_message_id))
+        except Exception:
+            return await interaction.response.send_message("❌ Could not fetch the staff report message.", ephemeral=True)
+
+        # Reopen it to Open
+        self.db.update_status(report_id, "Open")
+        report["status"] = "Open"
+
+        # Build updated embed
+        try:
+            reporter = await interaction.client.fetch_user(report["reporter_id"])
+        except Exception:
+            reporter = interaction.client.get_user(report["reporter_id"]) or interaction.user
+
+        source = interaction.guild.get_channel(report["source_channel_id"]) or staff_ch
+
+        embed = build_staff_embed(
+            report["id"],
+            report["report_type"],
+            reporter,
+            source,
+            report["payload"],
+            "Open",
+        )
+
+        # Attach a fresh view (buttons enabled)
+        view = ReportActionView(self.db, self.cfg.staff_channel_id, self.cfg.support_channel_id, self.cfg.public_updates)
+
+        await staff_msg.edit(embed=embed, view=view)
+        await interaction.response.send_message(f"✅ Re-activated buttons for report **#{report_id}**.", ephemeral=True)
 
 
 async def setup(bot):

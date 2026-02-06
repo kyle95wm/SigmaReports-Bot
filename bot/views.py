@@ -2,8 +2,6 @@ import discord
 from bot.db import ReportDB
 from bot.utils import build_staff_embed, report_subject, try_dm
 
-from bot.modals import TVReportModal, VODReportModal
-
 
 class StaffFollowUpModal(discord.ui.Modal, title="Send follow-up message"):
     message = discord.ui.TextInput(
@@ -188,73 +186,3 @@ class ReportActionView(discord.ui.View):
                 pass
 
             await try_dm(reporter, msg)
-
-
-class ReportPanelView(discord.ui.View):
-    """
-    A persistent "report panel" with two buttons that open the TV/VOD report modals.
-    """
-    def __init__(self, db: ReportDB, cfg):
-        super().__init__(timeout=None)
-        self.db = db
-        self.cfg = cfg
-
-    def _allowed_channel(self, interaction: discord.Interaction) -> bool:
-        return bool(interaction.channel) and interaction.channel.id in set(self.cfg.reports_channel_ids)
-
-    def _support_channel_mention(self, interaction: discord.Interaction) -> str:
-        if not interaction.guild or not self.cfg.support_channel_id:
-            return "the support channel"
-        ch = interaction.guild.get_channel(self.cfg.support_channel_id)
-        return ch.mention if ch else "the support channel"
-
-    async def _block_gate(self, interaction: discord.Interaction) -> bool:
-        if not interaction.guild:
-            return True
-
-        blocked, is_perm, expires_at, reason = self.db.is_user_blocked(interaction.guild.id, interaction.user.id)
-        if not blocked:
-            return True
-
-        support = self._support_channel_mention(interaction)
-        reason_txt = f"\nReason: {reason}" if reason else ""
-
-        if is_perm:
-            msg = (
-                f"🚫 {interaction.user.mention} you are blocked from using the report system.\n"
-                f"To appeal, please open a ticket in {support}.{reason_txt}"
-            )
-        else:
-            msg = (
-                f"🚫 {interaction.user.mention} you are temporarily blocked from using the report system.\n"
-                f"To appeal, please open a ticket in {support}.{reason_txt}"
-            )
-
-        await interaction.response.send_message(msg)
-        return False
-
-    @discord.ui.button(
-        label="Report Live TV",
-        style=discord.ButtonStyle.primary,
-        emoji="📺",
-        custom_id="panel:report_tv",
-    )
-    async def panel_report_tv(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not self._allowed_channel(interaction):
-            return await interaction.response.send_message("Please use the report panel in the designated reports channel.")
-        if not await self._block_gate(interaction):
-            return
-        await interaction.response.send_modal(TVReportModal(self.db, self.cfg))
-
-    @discord.ui.button(
-        label="Report Movie / TV Show",
-        style=discord.ButtonStyle.secondary,
-        emoji="🎬",
-        custom_id="panel:report_vod",
-    )
-    async def panel_report_vod(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not self._allowed_channel(interaction):
-            return await interaction.response.send_message("Please use the report panel in the designated reports channel.")
-        if not await self._block_gate(interaction):
-            return
-        await interaction.response.send_modal(VODReportModal(self.db, self.cfg))

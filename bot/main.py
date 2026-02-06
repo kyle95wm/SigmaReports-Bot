@@ -7,7 +7,7 @@ from discord.ext import commands
 
 from bot.config import load_config
 from bot.db import ReportDB
-from bot.views import ReportActionView, ReportPanelView
+from bot.views import ReportActionView
 
 try:
     import aiohttp
@@ -52,7 +52,7 @@ class SigmaReportsBot(commands.Bot):
         self._presence_task: Optional[asyncio.Task] = None
 
     async def setup_hook(self) -> None:
-        # Persistent views (staff buttons + report panel buttons)
+        # Persistent view for staff buttons
         self.add_view(
             ReportActionView(
                 self.db,
@@ -61,9 +61,8 @@ class SigmaReportsBot(commands.Bot):
                 self.cfg.public_updates,
             )
         )
-        self.add_view(ReportPanelView(self.db, self.cfg))
 
-        # Load cogs
+        # Load cogs (registers app commands)
         await self.load_extension("bot.cogs.reports")
         await self.load_extension("bot.cogs.moderation")
 
@@ -71,12 +70,16 @@ class SigmaReportsBot(commands.Bot):
         guild_id = 1457559352717086917
         guild = discord.Object(id=guild_id)
 
+        # IMPORTANT: copy global commands into the guild before syncing
         self.tree.copy_global_to(guild=guild)
+
         synced = await self.tree.sync(guild=guild)
         print(f"Synced {len(synced)} commands to guild {guild_id}")
 
     async def on_ready(self):
         print(f"Logged in as {self.user} (ID: {self.user.id})")
+
+        # Start presence rotator once (on_ready can fire more than once)
         if self._presence_task is None or self._presence_task.done():
             self._presence_task = asyncio.create_task(self._presence_rotator())
 
@@ -133,7 +136,11 @@ class SigmaReportsBot(commands.Bot):
             print("Presence: aiohttp missing; install aiohttp to use TMDB titles.")
             return
 
-        headers = {"Authorization": f"Bearer {token}", "accept": "application/json"}
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "accept": "application/json",
+        }
+
         urls = [
             "https://api.themoviedb.org/3/trending/movie/day",
             "https://api.themoviedb.org/3/trending/tv/day",
