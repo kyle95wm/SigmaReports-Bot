@@ -61,7 +61,8 @@ class TVReportModal(discord.ui.Modal, title="Report TV Issue"):
         self.db.set_staff_message_id(report_id, msg.id)
 
         await interaction.response.send_message(
-            f"{interaction.user.mention} submitted TV report **#{report_id}** for **{payload['channel_name']}**."
+            f"{interaction.user.mention} submitted TV report **#{report_id}** for **{payload['channel_name']}**.",
+            ephemeral=True,
         )
 
 
@@ -128,5 +129,6 @@ class VODReportModal(discord.ui.Modal, title="Report VOD Issue"):
         self.db.set_staff_message_id(report_id, msg.id)
 
         await interaction.response.send_message(
-            f"{interaction.user.mention} submitted VOD report **#{report_id}** for **{payload['title']}** ({q})."
+            f"{interaction.user.mention} submitted VOD report **#{report_id}** for **{payload['title']}** ({q}).",
+            ephemeral=True,
         )
