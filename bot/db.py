@@ -1,5 +1,4 @@
 import json
-import os
 import sqlite3
 from datetime import datetime, timezone, timedelta
 from typing import Optional
@@ -9,9 +8,11 @@ def _utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _parse_iso(dt: str) -> Optional[datetime]:
+def _try_parse_iso(s: Optional[str]) -> Optional[datetime]:
+    if not s:
+        return None
     try:
-        return datetime.fromisoformat(dt)
+        return datetime.fromisoformat(s)
     except Exception:
         return None
 
@@ -19,288 +20,398 @@ def _parse_iso(dt: str) -> Optional[datetime]:
 class ReportDB:
     def __init__(self, path: str):
         self.path = path
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        self._init()
+        self.conn = sqlite3.connect(self.path, check_same_thread=False)
+        self.conn.row_factory = sqlite3.Row
 
-    def _conn(self):
-        return sqlite3.connect(self.path)
+        self._payload_col = "payload"
+        self._created_at_col = "created_at"
 
-    def _init(self):
-        with self._conn() as con:
-            con.execute(
-                """
-                CREATE TABLE IF NOT EXISTS reports (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    report_type TEXT NOT NULL,
-                    reporter_id INTEGER NOT NULL,
-                    guild_id INTEGER NOT NULL,
-                    source_channel_id INTEGER NOT NULL,
-                    staff_message_id INTEGER,
-                    status TEXT NOT NULL,
-                    payload_json TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                )
-                """
+        self._ensure_schema()
+        self._detect_reports_columns()
+
+    # ---------------- Schema ----------------
+
+    def _ensure_schema(self) -> None:
+        cur = self.conn.cursor()
+
+        # NOTE: This CREATE TABLE will not overwrite an existing table.
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS reports (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                report_type TEXT NOT NULL,
+                reporter_id INTEGER NOT NULL,
+                guild_id INTEGER NOT NULL,
+                source_channel_id INTEGER NOT NULL,
+                staff_message_id INTEGER,
+                status TEXT NOT NULL DEFAULT 'Open',
+                payload TEXT,
+                created_at TEXT,
+                updated_at TEXT
             )
-            con.execute("CREATE INDEX IF NOT EXISTS idx_reports_staff_msg ON reports(staff_message_id)")
+            """
+        )
 
-            con.execute(
-                """
-                CREATE TABLE IF NOT EXISTS bot_settings (
-                    key TEXT PRIMARY KEY,
-                    value TEXT NOT NULL
-                )
-                """
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
             )
-            con.execute("INSERT OR IGNORE INTO bot_settings (key, value) VALUES ('report_pings_enabled', '1')")
+            """
+        )
 
-            con.execute(
-                """
-                CREATE TABLE IF NOT EXISTS user_blocks (
-                    guild_id INTEGER NOT NULL,
-                    user_id INTEGER NOT NULL,
-                    is_permanent INTEGER NOT NULL,
-                    expires_at TEXT,
-                    reason TEXT,
-                    created_by INTEGER,
-                    created_at TEXT NOT NULL,
-                    PRIMARY KEY (guild_id, user_id)
-                )
-                """
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_blocks (
+                guild_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                is_permanent INTEGER NOT NULL DEFAULT 0,
+                expires_at TEXT,
+                reason TEXT,
+                blocked_by INTEGER,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (guild_id, user_id)
             )
-            con.execute("CREATE INDEX IF NOT EXISTS idx_user_blocks_expires ON user_blocks(expires_at)")
-            con.commit()
+            """
+        )
 
-    # ---------------- reports ----------------
-
-    def create_report(self, report_type: str, reporter_id: int, guild_id: int, source_channel_id: int, payload: dict) -> int:
-        now = _utcnow_iso()
-        with self._conn() as con:
-            cur = con.execute(
-                """
-                INSERT INTO reports (report_type, reporter_id, guild_id, source_channel_id, status, payload_json, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (report_type, reporter_id, guild_id, source_channel_id, "Open", json.dumps(payload), now, now),
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS liveboards (
+                guild_id INTEGER PRIMARY KEY,
+                channel_id INTEGER NOT NULL,
+                message_id INTEGER NOT NULL
             )
-            con.commit()
-            return int(cur.lastrowid)
+            """
+        )
 
-    def set_staff_message_id(self, report_id: int, staff_message_id: int):
-        now = _utcnow_iso()
-        with self._conn() as con:
-            con.execute(
-                "UPDATE reports SET staff_message_id = ?, updated_at = ? WHERE id = ?",
-                (staff_message_id, now, report_id),
-            )
-            con.commit()
+        self.conn.commit()
 
-    def get_by_staff_message_id(self, staff_message_id: int) -> Optional[dict]:
-        with self._conn() as con:
-            row = con.execute(
-                """
-                SELECT id, report_type, reporter_id, guild_id, source_channel_id, staff_message_id, status, payload_json, created_at, updated_at
-                FROM reports
-                WHERE staff_message_id = ?
-                """,
-                (staff_message_id,),
-            ).fetchone()
+        if self._get_setting("report_pings_enabled") is None:
+            self._set_setting("report_pings_enabled", "1")
 
+    def _table_columns(self, table: str) -> list[str]:
+        cur = self.conn.cursor()
+        cur.execute(f"PRAGMA table_info({table})")
+        return [r[1] for r in cur.fetchall()]
+
+    def _detect_reports_columns(self) -> None:
+        cols = self._table_columns("reports")
+
+        # Detect payload column (your DB uses payload_json)
+        if "payload" in cols:
+            self._payload_col = "payload"
+        elif "payload_json" in cols:
+            self._payload_col = "payload_json"
+        else:
+            self._payload_col = "payload"
+
+        # Detect created_at column
+        self._created_at_col = "created_at" if "created_at" in cols else "created_at"
+
+        print(
+            f"DB: reports payload column = '{self._payload_col}', created_at column = '{self._created_at_col}'"
+        )
+
+    # ---------------- Settings ----------------
+
+    def _get_setting(self, key: str) -> Optional[str]:
+        cur = self.conn.cursor()
+        cur.execute("SELECT value FROM settings WHERE key=?", (key,))
+        row = cur.fetchone()
+        return row["value"] if row else None
+
+    def _set_setting(self, key: str, value: str) -> None:
+        cur = self.conn.cursor()
+        cur.execute(
+            "INSERT INTO settings(key, value) VALUES(?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (key, value),
+        )
+        self.conn.commit()
+
+    # ---------------- Reports ----------------
+
+    def create_report(
+        self,
+        report_type: str,
+        reporter_id: int,
+        guild_id: int,
+        source_channel_id: int,
+        payload: dict,
+    ) -> int:
+        payload_json = json.dumps(payload, ensure_ascii=False)
+
+        cur = self.conn.cursor()
+        cur.execute(
+            f"""
+            INSERT INTO reports
+            (report_type, reporter_id, guild_id, source_channel_id,
+             {self._payload_col}, status, created_at)
+            VALUES (?, ?, ?, ?, ?, 'Open', ?)
+            """,
+            (
+                report_type.upper(),
+                reporter_id,
+                guild_id,
+                source_channel_id,
+                payload_json,
+                _utcnow_iso(),
+            ),
+        )
+        self.conn.commit()
+        return int(cur.lastrowid)
+
+    def set_staff_message_id(self, report_id: int, message_id: int) -> None:
+        cur = self.conn.cursor()
+        cur.execute(
+            "UPDATE reports SET staff_message_id=? WHERE id=?",
+            (message_id, report_id),
+        )
+        self.conn.commit()
+
+    def update_status(self, report_id: int, status: str) -> None:
+        cur = self.conn.cursor()
+        cur.execute(
+            "UPDATE reports SET status=?, updated_at=? WHERE id=?",
+            (status, _utcnow_iso(), report_id),
+        )
+        self.conn.commit()
+
+    def get_by_id(self, report_id: int):
+        cur = self.conn.cursor()
+        cur.execute("SELECT * FROM reports WHERE id=?", (int(report_id),))
+        return self._row_to_report(cur.fetchone())
+
+    # Compatibility alias expected by some cogs
+    def get_report_by_id(self, report_id: int):
+        return self.get_by_id(report_id)
+
+    def get_by_staff_message_id(self, staff_message_id: int):
+        cur = self.conn.cursor()
+        cur.execute(
+            "SELECT * FROM reports WHERE staff_message_id=?",
+            (int(staff_message_id),),
+        )
+        row = cur.fetchone()
+        return self._row_to_report(row)
+
+    def _row_to_report(self, row):
         if not row:
             return None
 
-        return {
-            "id": row[0],
-            "report_type": row[1],
-            "reporter_id": row[2],
-            "guild_id": row[3],
-            "source_channel_id": row[4],
-            "staff_message_id": row[5],
-            "status": row[6],
-            "payload": json.loads(row[7]),
-            "created_at": row[8],
-            "updated_at": row[9],
-        }
-
-    # ✅ NEW: lookup by report id (needed to re-enable buttons)
-    def get_report_by_id(self, report_id: int) -> Optional[dict]:
-        with self._conn() as con:
-            row = con.execute(
-                """
-                SELECT id, report_type, reporter_id, guild_id, source_channel_id, staff_message_id, status, payload_json, created_at, updated_at
-                FROM reports
-                WHERE id = ?
-                """,
-                (report_id,),
-            ).fetchone()
-
-        if not row:
-            return None
+        raw_payload = row[self._payload_col] if self._payload_col in row.keys() else None
+        try:
+            payload = json.loads(raw_payload) if raw_payload else {}
+        except Exception:
+            payload = {}
 
         return {
-            "id": row[0],
-            "report_type": row[1],
-            "reporter_id": row[2],
-            "guild_id": row[3],
-            "source_channel_id": row[4],
-            "staff_message_id": row[5],
-            "status": row[6],
-            "payload": json.loads(row[7]),
-            "created_at": row[8],
-            "updated_at": row[9],
+            "id": row["id"],
+            "report_type": row["report_type"],
+            "reporter_id": row["reporter_id"],
+            "guild_id": row["guild_id"],
+            "source_channel_id": row["source_channel_id"],
+            "payload": payload,
+            "status": row["status"] if "status" in row.keys() else "Open",
+            "staff_message_id": row["staff_message_id"] if "staff_message_id" in row.keys() else None,
+            "created_at": row["created_at"] if "created_at" in row.keys() else None,
+            "updated_at": row["updated_at"] if "updated_at" in row.keys() else None,
         }
 
-    def update_status(self, report_id: int, status: str):
-        now = _utcnow_iso()
-        with self._conn() as con:
-            con.execute(
-                "UPDATE reports SET status = ?, updated_at = ? WHERE id = ?",
-                (status, now, report_id),
-            )
-            con.commit()
-
-    # ---------------- settings ----------------
-
-    def get_setting(self, key: str, default: str = "") -> str:
-        with self._conn() as con:
-            row = con.execute("SELECT value FROM bot_settings WHERE key = ?", (key,)).fetchone()
-        return row[0] if row else default
-
-    def set_setting(self, key: str, value: str):
-        with self._conn() as con:
-            con.execute(
-                "INSERT INTO bot_settings (key, value) VALUES (?, ?) "
-                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                (key, value),
-            )
-            con.commit()
+    # ---------------- Report pings ----------------
 
     def get_report_pings_enabled(self) -> bool:
-        return self.get_setting("report_pings_enabled", "1") == "1"
+        v = self._get_setting("report_pings_enabled")
+        return v != "0"
 
     def toggle_report_pings(self) -> bool:
-        new_val = "0" if self.get_report_pings_enabled() else "1"
-        self.set_setting("report_pings_enabled", new_val)
+        enabled = self.get_report_pings_enabled()
+        new_val = "0" if enabled else "1"
+        self._set_setting("report_pings_enabled", new_val)
         return new_val == "1"
 
-    # ---------------- blocks ----------------
-
-    def _cleanup_expired_block(self, guild_id: int, user_id: int):
-        with self._conn() as con:
-            row = con.execute(
-                "SELECT is_permanent, expires_at FROM user_blocks WHERE guild_id = ? AND user_id = ?",
-                (guild_id, user_id),
-            ).fetchone()
-
-            if not row:
-                return
-
-            is_perm = int(row[0]) == 1
-            expires_at = row[1]
-            if is_perm:
-                return
-
-            dt = _parse_iso(expires_at) if expires_at else None
-            if not dt or dt <= datetime.now(timezone.utc):
-                con.execute(
-                    "DELETE FROM user_blocks WHERE guild_id = ? AND user_id = ?",
-                    (guild_id, user_id),
-                )
-                con.commit()
-
-    def is_user_blocked(self, guild_id: int, user_id: int) -> tuple[bool, bool, Optional[str], Optional[str]]:
-        self._cleanup_expired_block(guild_id, user_id)
-
-        with self._conn() as con:
-            row = con.execute(
-                "SELECT is_permanent, expires_at, reason FROM user_blocks WHERE guild_id = ? AND user_id = ?",
-                (guild_id, user_id),
-            ).fetchone()
-
-        if not row:
-            return (False, False, None, None)
-
-        return (True, int(row[0]) == 1, row[1], row[2])
+    # ---------------- Blocks (kept for compatibility) ----------------
 
     def block_user(
         self,
         guild_id: int,
         user_id: int,
-        created_by: int,
-        duration_minutes: Optional[int],
-        reason: str,
-    ):
-        now = _utcnow_iso()
-        is_perm = 1 if duration_minutes is None else 0
+        permanent: bool,
+        duration_minutes: Optional[int] = None,
+        reason: str = "",
+        blocked_by: Optional[int] = None,
+    ) -> None:
         expires_at = None
-        if duration_minutes is not None:
-            expires_at = (datetime.now(timezone.utc) + timedelta(minutes=int(duration_minutes))).isoformat()
+        if not permanent and duration_minutes:
+            expires_at = (datetime.now(timezone.utc) + timedelta(minutes=duration_minutes)).isoformat()
 
-        with self._conn() as con:
-            con.execute(
-                """
-                INSERT INTO user_blocks (guild_id, user_id, is_permanent, expires_at, reason, created_by, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(guild_id, user_id) DO UPDATE SET
-                    is_permanent=excluded.is_permanent,
-                    expires_at=excluded.expires_at,
-                    reason=excluded.reason,
-                    created_by=excluded.created_by,
-                    created_at=excluded.created_at
-                """,
-                (guild_id, user_id, is_perm, expires_at, reason, created_by, now),
-            )
-            con.commit()
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO user_blocks (guild_id, user_id, is_permanent, expires_at, reason, blocked_by, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(guild_id, user_id)
+            DO UPDATE SET is_permanent=excluded.is_permanent,
+                          expires_at=excluded.expires_at,
+                          reason=excluded.reason,
+                          blocked_by=excluded.blocked_by,
+                          created_at=excluded.created_at
+            """,
+            (
+                int(guild_id),
+                int(user_id),
+                1 if permanent else 0,
+                expires_at,
+                reason,
+                blocked_by,
+                _utcnow_iso(),
+            ),
+        )
+        self.conn.commit()
 
     def unblock_user(self, guild_id: int, user_id: int) -> bool:
-        with self._conn() as con:
-            cur = con.execute(
-                "DELETE FROM user_blocks WHERE guild_id = ? AND user_id = ?",
-                (guild_id, user_id),
-            )
-            con.commit()
-            return cur.rowcount > 0
+        cur = self.conn.cursor()
+        cur.execute("DELETE FROM user_blocks WHERE guild_id=? AND user_id=?", (int(guild_id), int(user_id)))
+        self.conn.commit()
+        return cur.rowcount > 0
 
-    def list_blocks(self, guild_id: int) -> list[dict]:
-        with self._conn() as con:
-            rows = con.execute(
-                """
-                SELECT user_id, is_permanent, expires_at, reason, created_by, created_at
-                FROM user_blocks
-                WHERE guild_id = ?
-                """,
-                (guild_id,),
-            ).fetchall()
+    def is_user_blocked(self, guild_id: int, user_id: int) -> tuple[bool, bool, Optional[str], str]:
+        cur = self.conn.cursor()
+        cur.execute(
+            "SELECT is_permanent, expires_at, reason FROM user_blocks WHERE guild_id=? AND user_id=?",
+            (int(guild_id), int(user_id)),
+        )
+        row = cur.fetchone()
+        if not row:
+            return (False, False, None, "")
 
-        active: list[dict] = []
-        now = datetime.now(timezone.utc)
+        is_perm = bool(row["is_permanent"])
+        expires_at = row["expires_at"]
+        reason = row["reason"] or ""
 
-        for (user_id, is_perm_i, expires_at, reason, created_by, created_at) in rows:
-            is_perm = int(is_perm_i) == 1
-            if not is_perm:
-                dt = _parse_iso(expires_at) if expires_at else None
-                if (dt is None) or (dt <= now):
-                    self._cleanup_expired_block(guild_id, int(user_id))
-                    continue
+        if is_perm:
+            return (True, True, None, reason)
 
-            active.append(
+        exp_dt = _try_parse_iso(expires_at)
+        if exp_dt and exp_dt <= datetime.now(timezone.utc):
+            self.unblock_user(guild_id, user_id)
+            return (False, False, None, "")
+
+        return (True, False, expires_at, reason)
+
+    def list_blocked_users(self, guild_id: int) -> list[dict]:
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            SELECT guild_id, user_id, is_permanent, expires_at, reason, blocked_by, created_at
+            FROM user_blocks
+            WHERE guild_id=?
+            ORDER BY created_at DESC
+            """,
+            (int(guild_id),),
+        )
+        out = []
+        for r in cur.fetchall():
+            out.append(
                 {
-                    "user_id": int(user_id),
-                    "is_permanent": is_perm,
-                    "expires_at": expires_at,
-                    "reason": reason or "",
-                    "created_by": int(created_by) if created_by is not None else None,
-                    "created_at": created_at,
+                    "guild_id": r["guild_id"],
+                    "user_id": r["user_id"],
+                    "is_permanent": bool(r["is_permanent"]),
+                    "expires_at": r["expires_at"],
+                    "reason": r["reason"] or "",
+                    "blocked_by": r["blocked_by"],
+                    "created_at": r["created_at"],
+                }
+            )
+        return out
+
+    # ---------------- Liveboard ----------------
+
+    def set_liveboard(self, guild_id: int, channel_id: int, message_id: int):
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO liveboards (guild_id, channel_id, message_id)
+            VALUES (?, ?, ?)
+            ON CONFLICT(guild_id)
+            DO UPDATE SET channel_id=excluded.channel_id,
+                          message_id=excluded.message_id
+            """,
+            (int(guild_id), int(channel_id), int(message_id)),
+        )
+        self.conn.commit()
+
+    def get_liveboard(self, guild_id: int):
+        cur = self.conn.cursor()
+        cur.execute(
+            "SELECT guild_id, channel_id, message_id FROM liveboards WHERE guild_id=?",
+            (int(guild_id),),
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        return {"guild_id": row["guild_id"], "channel_id": row["channel_id"], "message_id": row["message_id"]}
+
+    # Compatibility method expected by liveboard loop
+    def list_liveboards(self) -> list[dict]:
+        cur = self.conn.cursor()
+        cur.execute("SELECT guild_id, channel_id, message_id FROM liveboards")
+        rows = cur.fetchall()
+        return [{"guild_id": r["guild_id"], "channel_id": r["channel_id"], "message_id": r["message_id"]} for r in rows]
+
+    def clear_liveboard(self, guild_id: int):
+        cur = self.conn.cursor()
+        cur.execute("DELETE FROM liveboards WHERE guild_id=?", (int(guild_id),))
+        self.conn.commit()
+
+    def list_active_reports(self, guild_id: int, closed_statuses: set[str]):
+        closed = tuple(closed_statuses)
+        placeholders = ",".join("?" for _ in closed)
+
+        cur = self.conn.cursor()
+        cur.execute(
+            f"""
+            SELECT id, report_type, {self._payload_col} AS payload_blob, status,
+                   staff_message_id, created_at
+            FROM reports
+            WHERE guild_id = ?
+              AND status NOT IN ({placeholders})
+            ORDER BY id DESC
+            """,
+            (int(guild_id), *closed),
+        )
+
+        results = []
+        for row in cur.fetchall():
+            raw_payload = row["payload_blob"]
+            try:
+                payload = json.loads(raw_payload) if raw_payload else {}
+            except Exception:
+                payload = {}
+
+            rtype = (row["report_type"] or "").upper()
+
+            if rtype == "TV":
+                subject = payload.get("channel_name") or payload.get("channel") or "Unknown"
+            elif rtype == "VOD":
+                subject = payload.get("title") or "Unknown"
+            else:
+                subject = "Unknown"
+
+            created_dt = _try_parse_iso(row["created_at"] if "created_at" in row.keys() else None)
+
+            results.append(
+                {
+                    "id": row["id"],
+                    "report_type": rtype,
+                    "payload": payload,
+                    "status": row["status"] if "status" in row.keys() else "Open",
+                    "staff_message_id": row["staff_message_id"] if "staff_message_id" in row.keys() else None,
+                    "subject": subject,
+                    "created_at_dt": created_dt,
                 }
             )
 
-        def _sort_key(x: dict):
-            if x["is_permanent"]:
-                return (0, 0)
-            dt = _parse_iso(x["expires_at"] or "")
-            ts = int(dt.timestamp()) if dt else 2**31
-            return (1, ts)
-
-        active.sort(key=_sort_key)
-        return active
+        return results

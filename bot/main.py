@@ -15,6 +15,7 @@ except Exception:
     aiohttp = None  # type: ignore
 
 
+# --- Presence pools (tweak these any time) ---
 IPTV_FLAVOR = [
     "IPTV playlists",
     "Live TV",
@@ -40,9 +41,13 @@ LOCAL_CHANNELS = [
 ]
 
 
+DEFAULT_GUILD_ID_FOR_SYNC = 1457559352717086917  # your guild id you used previously
+
+
 class SigmaReportsBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
+        # message_content intent is NOT required for slash commands
         super().__init__(command_prefix="!", intents=intents)
 
         self.cfg = load_config()
@@ -52,7 +57,7 @@ class SigmaReportsBot(commands.Bot):
         self._presence_task: Optional[asyncio.Task] = None
 
     async def setup_hook(self) -> None:
-        # Persistent staff action buttons
+        # Persistent view for staff buttons
         self.add_view(
             ReportActionView(
                 self.db,
@@ -64,31 +69,49 @@ class SigmaReportsBot(commands.Bot):
 
         # Load cogs
         await self.load_extension("bot.cogs.reports")
-        await self.load_extension("bot.cogs.moderation")
-        await self.load_extension("bot.cogs.panel")
 
-        # Guild sync for fast command availability
-        guild_id = 1457559352717086917
-        guild = discord.Object(id=guild_id)
+        # Optional cogs (don’t crash if file missing)
+        for ext in (
+            "bot.cogs.moderation",
+            "bot.cogs.panel",
+            "bot.cogs.liveboard",
+        ):
+            try:
+                await self.load_extension(ext)
+            except Exception as e:
+                print(f"⚠️  Skipping {ext}: {repr(e)}")
 
-        self.tree.copy_global_to(guild=guild)
-        synced = await self.tree.sync(guild=guild)
-        print(f"Synced {len(synced)} commands to guild {guild_id}")
+        # Sync commands to a single guild for fast iteration
+        guild_id = getattr(self.cfg, "guild_id", None) or DEFAULT_GUILD_ID_FOR_SYNC
+        if guild_id:
+            guild = discord.Object(id=int(guild_id))
+            try:
+                self.tree.copy_global_to(guild=guild)
+                synced = await self.tree.sync(guild=guild)
+                print(f"Synced {len(synced)} commands to guild {guild_id}")
+            except Exception as e:
+                print(f"⚠️  Command sync failed: {repr(e)}")
+        else:
+            print("⚠️  No guild_id configured; skipping guild sync.")
+
+        # Start rotating presence
+        self._presence_task = asyncio.create_task(self._presence_rotator())
 
     async def on_ready(self):
         print(f"Logged in as {self.user} (ID: {self.user.id})")
 
-        if self._presence_task is None or self._presence_task.done():
-            self._presence_task = asyncio.create_task(self._presence_rotator())
+    # ---------------- Presence rotation (5 min) ----------------
 
     async def _presence_rotator(self):
         await self.wait_until_ready()
 
+        # Refresh TMDB cache on startup
         try:
             await self._refresh_tmdb_cache()
         except Exception as e:
             print("Presence: TMDB refresh failed:", repr(e))
 
+        # Then run every 5 minutes; refresh TMDB every 6 hours
         ticks = 0
         while not self.is_closed():
             try:
@@ -99,6 +122,7 @@ class SigmaReportsBot(commands.Bot):
             await asyncio.sleep(300)  # 5 minutes
             ticks += 1
 
+            # every 6 hours (72 * 5min)
             if ticks % 72 == 0:
                 try:
                     await self._refresh_tmdb_cache()
@@ -127,14 +151,17 @@ class SigmaReportsBot(commands.Bot):
         token = getattr(self.cfg, "tmdb_bearer_token", "") or ""
         if not token:
             self._tmdb_cache = []
-            print("Presence: TMDB token missing; skipping TMDB titles.")
-            return
-        if aiohttp is None:
-            self._tmdb_cache = []
-            print("Presence: aiohttp missing; install aiohttp to use TMDB titles.")
             return
 
-        headers = {"Authorization": f"Bearer {token}", "accept": "application/json"}
+        if aiohttp is None:
+            self._tmdb_cache = []
+            return
+
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "accept": "application/json",
+        }
+
         urls = [
             "https://api.themoviedb.org/3/trending/movie/day",
             "https://api.themoviedb.org/3/trending/tv/day",
@@ -143,16 +170,20 @@ class SigmaReportsBot(commands.Bot):
         titles: list[str] = []
         async with aiohttp.ClientSession(headers=headers) as session:
             for url in urls:
-                async with session.get(url, timeout=15) as resp:
-                    if resp.status != 200:
-                        raise RuntimeError(f"TMDB HTTP {resp.status} for {url}")
-                    data = await resp.json()
-                    for item in data.get("results", [])[:25]:
-                        name = item.get("title") or item.get("name")
-                        if name:
-                            titles.append(name)
+                try:
+                    async with session.get(url, timeout=15) as resp:
+                        if resp.status != 200:
+                            continue
+                        data = await resp.json()
+                        for item in data.get("results", [])[:25]:
+                            name = item.get("title") or item.get("name")
+                            if name:
+                                titles.append(name)
+                except Exception:
+                    continue
 
-        deduped: list[str] = []
+        # Keep a small, deduped cache
+        deduped = []
         seen = set()
         for t in titles:
             k = t.lower()
