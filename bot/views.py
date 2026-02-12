@@ -6,7 +6,11 @@ from bot.db import ReportDB
 from bot.utils import build_staff_embed, report_subject, try_dm
 
 
-CLOSED_STATUSES = {"Resolved", "Can't replicate", "Fixed"}  # legacy-safe
+# legacy-safe (older DB rows may still have these)
+CLOSED_STATUSES = {"Resolved", "Can't replicate", "Fixed"}
+
+# Ticket category (channels will be created under here)
+TICKETS_CATEGORY_ID = 1458642805437239397
 
 
 def _nice_ref_label(url: str) -> str:
@@ -57,8 +61,6 @@ def _build_ticket_embed(
 
         embed.add_field(name="Channel", value=ch_name or "Unknown", inline=True)
         embed.add_field(name="Category", value=ch_cat or "Unknown", inline=True)
-
-        # Keep issue readable even if long
         embed.add_field(name="Issue", value=issue[:1024] if issue else "—", inline=False)
 
     elif rtype == "VOD":
@@ -210,7 +212,7 @@ class TicketResolveView(discord.ui.View):
         try:
             await interaction.channel.delete(reason=f"Resolved ticket for report #{report_id}")
         except discord.Forbidden:
-            # If cannot delete, at least lock it
+            # If cannot delete, at least rename
             try:
                 await interaction.channel.edit(name=f"closed-report-{report_id}")
             except Exception:
@@ -225,11 +227,14 @@ class ReportActionView(discord.ui.View):
     - Open ticket
 
     Open ticket:
-      - creates a private channel
+      - creates a private channel (under TICKETS_CATEGORY_ID if possible)
       - pings ONLY the reporter
       - posts a Resolve button inside the ticket
       - updates staff report status to "Ticket Open"
       - disables Open ticket button (Resolved stays available)
+
+    NOTE:
+      - Resolving from the staff channel does NOT post a public update (DM only).
     """
 
     def __init__(
@@ -308,16 +313,14 @@ class ReportActionView(discord.ui.View):
             ticket_channel_id=ticket_id,
         )
 
+        # Disable everything once resolved
         self.disable_all()
         await interaction.response.edit_message(embed=embed, view=self)
 
+        # ✅ DM only (no public post)
         await try_dm(reporter, f"✅ Update on your report #{report['id']} ({subject}): **Resolved**.")
-        if self.public_updates and isinstance(source, discord.TextChannel):
-            try:
-                await source.send(f"✅ {reporter.mention} update on report **#{report['id']}** (**{subject}**): **Resolved**.")
-            except discord.Forbidden:
-                pass
 
+        # Clear ticket reference (if any)
         try:
             self.db.set_ticket_channel_id(report["id"], None)
         except Exception:
@@ -340,8 +343,8 @@ class ReportActionView(discord.ui.View):
 
         guild = interaction.guild
         reporter = await interaction.client.fetch_user(int(report["reporter_id"]))
-        subject = report_subject(report["report_type"], report["payload"])
 
+        # Ticket already exists?
         existing_id = self.db.get_ticket_channel_id(report["id"])
         if existing_id:
             ch = guild.get_channel(int(existing_id))
@@ -354,7 +357,10 @@ class ReportActionView(discord.ui.View):
             return await interaction.response.send_message("❌ Couldn’t read my permissions.", ephemeral=True)
 
         if not me.guild_permissions.manage_channels:
-            return await interaction.response.send_message("❌ I don’t have permission to create channels or set permissions.", ephemeral=True)
+            return await interaction.response.send_message(
+                "❌ I don’t have permission to create channels or set permissions.",
+                ephemeral=True,
+            )
 
         overwrites: dict[discord.abc.Snowflake, discord.PermissionOverwrite] = {
             guild.default_role: discord.PermissionOverwrite(view_channel=False),
@@ -366,22 +372,31 @@ class ReportActionView(discord.ui.View):
             if role:
                 overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
 
+        # Put tickets in the category (if the bot can see it)
+        category = guild.get_channel(TICKETS_CATEGORY_ID)
+        if not isinstance(category, discord.CategoryChannel):
+            category = None
+
         channel_name = f"report-{report['id']}"
         try:
             ticket_channel = await guild.create_text_channel(
                 name=channel_name,
+                category=category,
                 overwrites=overwrites,
                 topic=f"Ticket for report #{report['id']} | report_id={report['id']}",
                 reason=f"Ticket opened for report #{report['id']}",
             )
         except discord.Forbidden:
-            return await interaction.response.send_message("❌ I don’t have permission to create channels or set permissions.", ephemeral=True)
+            return await interaction.response.send_message(
+                "❌ I don’t have permission to create channels or set permissions.",
+                ephemeral=True,
+            )
         except Exception as e:
             return await interaction.response.send_message(f"❌ Failed to create ticket channel: {e!r}", ephemeral=True)
 
         self.db.set_ticket_channel_id(report["id"], ticket_channel.id)
 
-        # ✅ Ticket top message: ping ONLY reporter + detailed embed + Resolve button
+        # Ticket top message: ping ONLY reporter + detailed embed + Resolve button
         summary = _build_ticket_embed(report=report, reporter=reporter, guild=guild)
 
         resolve_view = TicketResolveView(

@@ -27,6 +27,10 @@ class Reports(commands.Cog):
         self.db = db
         self.cfg = cfg
 
+    # ----------------------------
+    # Helpers
+    # ----------------------------
+
     def _allowed_channel(self, interaction: discord.Interaction) -> bool:
         return bool(interaction.channel) and interaction.channel.id in set(self.cfg.reports_channel_ids)
 
@@ -56,7 +60,10 @@ class Reports(commands.Cog):
         if not interaction.guild:
             return True
 
-        blocked, is_perm, expires_at, reason = self.db.is_user_blocked(interaction.guild.id, interaction.user.id)
+        blocked, is_perm, expires_at, reason = self.db.is_user_blocked(
+            interaction.guild.id, interaction.user.id
+        )
+
         if not blocked:
             return True
 
@@ -78,31 +85,43 @@ class Reports(commands.Cog):
         await interaction.response.send_message(msg)
         return False
 
+    # ----------------------------
+    # Report Commands
+    # ----------------------------
+
     @app_commands.command(
         name="report-tv",
-        description="Report an issue with a live TV channel (buffering, offline, wrong content, etc.)",
+        description="Report an issue with a live TV channel.",
     )
     async def report_tv(self, interaction: discord.Interaction):
         if not self._allowed_channel(interaction):
             return await interaction.response.send_message(
                 f"Use this command in: {self._allowed_channels_hint(interaction)}."
             )
+
         if not await self._block_gate(interaction):
             return
+
         await interaction.response.send_modal(TVReportModal(self.db, self.cfg))
 
     @app_commands.command(
         name="report-vod",
-        description="Report an issue with a movie or TV show (playback, missing episodes, quality issues, etc.)",
+        description="Report an issue with a movie or TV show.",
     )
     async def report_vod(self, interaction: discord.Interaction):
         if not self._allowed_channel(interaction):
             return await interaction.response.send_message(
                 f"Use this command in: {self._allowed_channels_hint(interaction)}."
             )
+
         if not await self._block_gate(interaction):
             return
+
         await interaction.response.send_modal(VODReportModal(self.db, self.cfg))
+
+    # ----------------------------
+    # Owner / Admin
+    # ----------------------------
 
     @app_commands.command(
         name="reportpings",
@@ -114,31 +133,40 @@ class Reports(commands.Cog):
 
         enabled = self.db.toggle_report_pings()
         state = "ON 🔔" if enabled else "OFF 🔕"
-        await interaction.response.send_message(f"Staff pings for new reports are now: **{state}**", ephemeral=True)
+        await interaction.response.send_message(
+            f"Staff pings for new reports are now: **{state}**",
+            ephemeral=True,
+        )
 
     @app_commands.command(
         name="synccommands",
         description="Force re-sync slash commands for this server (owner only).",
     )
-    @app_commands.describe(cleanup="If true, clears global + server commands first (use only if duplicates happen).")
-    async def synccommands(self, interaction: discord.Interaction, cleanup: bool = False):
+    async def synccommands(self, interaction: discord.Interaction):
         if interaction.user.id != OWNER_ID:
             return await interaction.response.send_message("❌ Not allowed.", ephemeral=True)
+
         if not interaction.guild:
-            return await interaction.response.send_message("This must be used in a server.", ephemeral=True)
+            return await interaction.response.send_message(
+                "This must be used in a server.",
+                ephemeral=True,
+            )
 
         guild = discord.Object(id=interaction.guild.id)
-        await interaction.response.send_message("Syncing commands…", ephemeral=True)
 
-        if cleanup:
-            self.bot.tree.clear_commands(guild=None)
-            await self.bot.tree.sync()
-            self.bot.tree.clear_commands(guild=guild)
-            await self.bot.tree.sync(guild=guild)
+        await interaction.response.send_message("Syncing…", ephemeral=True)
 
         self.bot.tree.copy_global_to(guild=guild)
         synced = await self.bot.tree.sync(guild=guild)
-        await interaction.followup.send(f"✅ Synced **{len(synced)}** commands.", ephemeral=True)
+
+        await interaction.followup.send(
+            f"✅ Synced **{len(synced)}** commands.",
+            ephemeral=True,
+        )
+
+    # ----------------------------
+    # Reactivate
+    # ----------------------------
 
     @app_commands.command(
         name="reportreactivate",
@@ -147,7 +175,11 @@ class Reports(commands.Cog):
     @app_commands.describe(report_id="The numeric report ID (e.g. 123)")
     async def reportreactivate(self, interaction: discord.Interaction, report_id: int):
         if not interaction.guild:
-            return await interaction.response.send_message("This must be used in a server.", ephemeral=True)
+            return await interaction.response.send_message(
+                "This must be used in a server.",
+                ephemeral=True,
+            )
+
         if not self._is_staff(interaction):
             return await interaction.response.send_message("❌ Not allowed.", ephemeral=True)
 
@@ -158,7 +190,7 @@ class Reports(commands.Cog):
         staff_message_id = report.get("staff_message_id")
         if not staff_message_id:
             return await interaction.response.send_message(
-                "❌ This report has no staff message linked (older report / missing staff message id).",
+                "❌ This report has no linked staff message.",
                 ephemeral=True,
             )
 
@@ -169,13 +201,15 @@ class Reports(commands.Cog):
         try:
             staff_msg = await staff_ch.fetch_message(int(staff_message_id))
         except Exception:
-            return await interaction.response.send_message("❌ Could not fetch the staff report message.", ephemeral=True)
+            return await interaction.response.send_message(
+                "❌ Could not fetch the staff report message.",
+                ephemeral=True,
+            )
 
-        # Reopen it to Open
+        # Reopen
         self.db.update_status(report_id, "Open")
         report["status"] = "Open"
 
-        # Build updated embed
         try:
             reporter = await interaction.client.fetch_user(report["reporter_id"])
         except Exception:
@@ -192,11 +226,21 @@ class Reports(commands.Cog):
             "Open",
         )
 
-        # Attach a fresh view (buttons enabled)
-        view = ReportActionView(self.db, self.cfg.staff_channel_id, self.cfg.support_channel_id, self.cfg.public_updates)
+        # ✅ FIXED: now includes staff_role_id
+        view = ReportActionView(
+            self.db,
+            self.cfg.staff_channel_id,
+            self.cfg.support_channel_id,
+            self.cfg.public_updates,
+            self.cfg.staff_role_id,
+        )
 
         await staff_msg.edit(embed=embed, view=view)
-        await interaction.response.send_message(f"✅ Re-activated buttons for report **#{report_id}**.", ephemeral=True)
+
+        await interaction.response.send_message(
+            f"✅ Re-activated buttons for report **#{report_id}**.",
+            ephemeral=True,
+        )
 
 
 async def setup(bot):
