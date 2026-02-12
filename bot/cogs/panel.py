@@ -19,6 +19,7 @@ class ReportPanelView(discord.ui.View):
     Persistent view for the report panel.
     Uses lazy imports inside button callbacks to avoid circular imports.
     """
+
     def __init__(self, db, cfg):
         super().__init__(timeout=None)
         self.db = db
@@ -113,15 +114,22 @@ class ReportPanelCog(commands.Cog):
             return await interaction.response.send_message("❌ Not allowed.", ephemeral=True)
 
         embed = discord.Embed(
-            title="Report an Issue",
+            title="Report an issue",
             description=(
                 "Use the buttons below to submit a report.\n\n"
-                "**📺 Live TV** — buffering, offline channels, wrong content\n"
-                "**🎬 Movies / TV Shows** — playback issues, missing episodes, quality problems\n\n"
-                "Please include as much detail as possible so staff can investigate faster."
+                "📺 **Live TV** — buffering, offline channels, wrong content\n"
+                "🎬 **Movies / TV Shows** — playback issues, missing episodes, quality problems\n\n"
+                "**What happens next?**\n"
+                "Staff will review your report. If we need more details, we may open a **private ticket channel** with you "
+                "so we can troubleshoot properly.\n\n"
+                "**Tips (the more detail, the faster we can fix it):**\n"
+                "• what you expected vs what happened\n"
+                "• when it happened\n"
+                "• device/app used\n"
+                "• any errors/screenshots (if applicable)"
             ),
         )
-        embed.set_footer(text="Staff will review your report and post updates in-channel and/or via DM.")
+        embed.set_footer(text="You’ll receive updates via DM and/or in a ticket channel if one is opened.")
 
         view = ReportPanelView(self.db, self.cfg)
 
