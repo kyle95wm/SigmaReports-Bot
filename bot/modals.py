@@ -36,6 +36,8 @@ class TVReportModal(discord.ui.Modal, title="Report TV Issue"):
         )
 
         staff_channel = interaction.guild.get_channel(self.cfg.staff_channel_id)
+        if not isinstance(staff_channel, discord.TextChannel):
+            return await interaction.response.send_message("❌ Staff channel not found.", ephemeral=True)
 
         embed = build_staff_embed(
             report_id,
@@ -51,6 +53,7 @@ class TVReportModal(discord.ui.Modal, title="Report TV Issue"):
             self.cfg.staff_channel_id,
             self.cfg.support_channel_id,
             self.cfg.public_updates,
+            self.cfg.staff_role_id,
         )
 
         ping_text = ""
@@ -61,7 +64,7 @@ class TVReportModal(discord.ui.Modal, title="Report TV Issue"):
         self.db.set_staff_message_id(report_id, msg.id)
 
         await interaction.response.send_message(
-            f"{interaction.user.mention} submitted TV report **#{report_id}** for **{payload['channel_name']}**.",
+            f"✅ Submitted TV report **#{report_id}** for **{payload['channel_name']}**.",
             ephemeral=True,
         )
 
@@ -104,6 +107,8 @@ class VODReportModal(discord.ui.Modal, title="Report VOD Issue"):
         )
 
         staff_channel = interaction.guild.get_channel(self.cfg.staff_channel_id)
+        if not isinstance(staff_channel, discord.TextChannel):
+            return await interaction.response.send_message("❌ Staff channel not found.", ephemeral=True)
 
         embed = build_staff_embed(
             report_id,
@@ -119,6 +124,7 @@ class VODReportModal(discord.ui.Modal, title="Report VOD Issue"):
             self.cfg.staff_channel_id,
             self.cfg.support_channel_id,
             self.cfg.public_updates,
+            self.cfg.staff_role_id,
         )
 
         ping_text = ""
@@ -129,6 +135,6 @@ class VODReportModal(discord.ui.Modal, title="Report VOD Issue"):
         self.db.set_staff_message_id(report_id, msg.id)
 
         await interaction.response.send_message(
-            f"{interaction.user.mention} submitted VOD report **#{report_id}** for **{payload['title']}** ({q}).",
+            f"✅ Submitted VOD report **#{report_id}** for **{payload['title']}** ({q}).",
             ephemeral=True,
         )

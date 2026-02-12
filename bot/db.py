@@ -1,7 +1,7 @@
 import json
 import sqlite3
 from datetime import datetime, timezone, timedelta
-from typing import Optional
+from typing import Optional, Iterable
 
 
 def _utcnow_iso() -> str:
@@ -17,24 +17,43 @@ def _try_parse_iso(s: Optional[str]) -> Optional[datetime]:
         return None
 
 
+def _row_get(row: sqlite3.Row, key: str, default=None):
+    # sqlite3.Row doesn't support .get()
+    try:
+        return row[key]
+    except Exception:
+        return default
+
+
 class ReportDB:
     def __init__(self, path: str):
         self.path = path
         self.conn = sqlite3.connect(self.path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
 
-        self._payload_col = "payload"
+        self._payload_col = "payload_json"
         self._created_at_col = "created_at"
 
         self._ensure_schema()
         self._detect_reports_columns()
 
-    # ---------------- Schema ----------------
+    # ---------------- Schema helpers ----------------
+
+    def _table_columns(self, table: str) -> list[str]:
+        cur = self.conn.cursor()
+        cur.execute(f"PRAGMA table_info({table})")
+        return [r[1] for r in cur.fetchall()]
+
+    def _ensure_column(self, table: str, col: str, decl: str) -> None:
+        cols = self._table_columns(table)
+        if col not in cols:
+            cur = self.conn.cursor()
+            cur.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
+            self.conn.commit()
 
     def _ensure_schema(self) -> None:
         cur = self.conn.cursor()
 
-        # NOTE: This CREATE TABLE will not overwrite an existing table.
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS reports (
@@ -45,8 +64,8 @@ class ReportDB:
                 source_channel_id INTEGER NOT NULL,
                 staff_message_id INTEGER,
                 status TEXT NOT NULL DEFAULT 'Open',
-                payload TEXT,
-                created_at TEXT,
+                payload_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
                 updated_at TEXT
             )
             """
@@ -88,31 +107,26 @@ class ReportDB:
 
         self.conn.commit()
 
+        # Newer features
+        self._ensure_column("reports", "ticket_channel_id", "INTEGER")
+
+        # Default setting values
         if self._get_setting("report_pings_enabled") is None:
             self._set_setting("report_pings_enabled", "1")
-
-    def _table_columns(self, table: str) -> list[str]:
-        cur = self.conn.cursor()
-        cur.execute(f"PRAGMA table_info({table})")
-        return [r[1] for r in cur.fetchall()]
 
     def _detect_reports_columns(self) -> None:
         cols = self._table_columns("reports")
 
-        # Detect payload column (your DB uses payload_json)
-        if "payload" in cols:
-            self._payload_col = "payload"
-        elif "payload_json" in cols:
+        if "payload_json" in cols:
             self._payload_col = "payload_json"
-        else:
+        elif "payload" in cols:
             self._payload_col = "payload"
+        else:
+            self._payload_col = "payload_json"
 
-        # Detect created_at column
         self._created_at_col = "created_at" if "created_at" in cols else "created_at"
 
-        print(
-            f"DB: reports payload column = '{self._payload_col}', created_at column = '{self._created_at_col}'"
-        )
+        print(f"DB: reports payload column = '{self._payload_col}', created_at column = '{self._created_at_col}'")
 
     # ---------------- Settings ----------------
 
@@ -133,50 +147,31 @@ class ReportDB:
 
     # ---------------- Reports ----------------
 
-    def create_report(
-        self,
-        report_type: str,
-        reporter_id: int,
-        guild_id: int,
-        source_channel_id: int,
-        payload: dict,
-    ) -> int:
+    def create_report(self, report_type: str, reporter_id: int, guild_id: int, source_channel_id: int, payload: dict) -> int:
         payload_json = json.dumps(payload, ensure_ascii=False)
+        now = _utcnow_iso()
 
         cur = self.conn.cursor()
+        # Always set updated_at too (some existing DBs have it NOT NULL)
         cur.execute(
             f"""
             INSERT INTO reports
-            (report_type, reporter_id, guild_id, source_channel_id,
-             {self._payload_col}, status, created_at)
-            VALUES (?, ?, ?, ?, ?, 'Open', ?)
+            (report_type, reporter_id, guild_id, source_channel_id, {self._payload_col}, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, 'Open', ?, ?)
             """,
-            (
-                report_type.upper(),
-                reporter_id,
-                guild_id,
-                source_channel_id,
-                payload_json,
-                _utcnow_iso(),
-            ),
+            (report_type.upper(), reporter_id, guild_id, source_channel_id, payload_json, now, now),
         )
         self.conn.commit()
         return int(cur.lastrowid)
 
     def set_staff_message_id(self, report_id: int, message_id: int) -> None:
         cur = self.conn.cursor()
-        cur.execute(
-            "UPDATE reports SET staff_message_id=? WHERE id=?",
-            (message_id, report_id),
-        )
+        cur.execute("UPDATE reports SET staff_message_id=? WHERE id=?", (int(message_id), int(report_id)))
         self.conn.commit()
 
     def update_status(self, report_id: int, status: str) -> None:
         cur = self.conn.cursor()
-        cur.execute(
-            "UPDATE reports SET status=?, updated_at=? WHERE id=?",
-            (status, _utcnow_iso(), report_id),
-        )
+        cur.execute("UPDATE reports SET status=?, updated_at=? WHERE id=?", (status, _utcnow_iso(), int(report_id)))
         self.conn.commit()
 
     def get_by_id(self, report_id: int):
@@ -184,18 +179,14 @@ class ReportDB:
         cur.execute("SELECT * FROM reports WHERE id=?", (int(report_id),))
         return self._row_to_report(cur.fetchone())
 
-    # Compatibility alias expected by some cogs
+    # Compatibility
     def get_report_by_id(self, report_id: int):
         return self.get_by_id(report_id)
 
     def get_by_staff_message_id(self, staff_message_id: int):
         cur = self.conn.cursor()
-        cur.execute(
-            "SELECT * FROM reports WHERE staff_message_id=?",
-            (int(staff_message_id),),
-        )
-        row = cur.fetchone()
-        return self._row_to_report(row)
+        cur.execute("SELECT * FROM reports WHERE staff_message_id=?", (int(staff_message_id),))
+        return self._row_to_report(cur.fetchone())
 
     def _row_to_report(self, row):
         if not row:
@@ -207,7 +198,7 @@ class ReportDB:
         except Exception:
             payload = {}
 
-        return {
+        out = {
             "id": row["id"],
             "report_type": row["report_type"],
             "reporter_id": row["reporter_id"],
@@ -219,6 +210,58 @@ class ReportDB:
             "created_at": row["created_at"] if "created_at" in row.keys() else None,
             "updated_at": row["updated_at"] if "updated_at" in row.keys() else None,
         }
+
+        if "ticket_channel_id" in row.keys():
+            out["ticket_channel_id"] = row["ticket_channel_id"]
+
+        return out
+
+    # Used by liveboard cog
+    def list_active_reports(self, guild_id: int, closed_statuses: Optional[Iterable[str]] = None) -> list[dict]:
+        closed = {s.strip() for s in (closed_statuses or []) if str(s).strip()}
+        cur = self.conn.cursor()
+
+        if closed:
+            placeholders = ",".join("?" for _ in closed)
+            params = [int(guild_id), *list(closed)]
+            cur.execute(
+                f"""
+                SELECT *
+                FROM reports
+                WHERE guild_id=?
+                  AND status NOT IN ({placeholders})
+                ORDER BY id DESC
+                """,
+                params,
+            )
+        else:
+            cur.execute(
+                """
+                SELECT *
+                FROM reports
+                WHERE guild_id=?
+                ORDER BY id DESC
+                """,
+                (int(guild_id),),
+            )
+
+        return [self._row_to_report(r) for r in cur.fetchall() if r]
+
+    # ---------------- Ticket helpers ----------------
+
+    def get_ticket_channel_id(self, report_id: int) -> Optional[int]:
+        cur = self.conn.cursor()
+        cur.execute("SELECT ticket_channel_id FROM reports WHERE id=?", (int(report_id),))
+        row = cur.fetchone()
+        if not row:
+            return None
+        val = row["ticket_channel_id"]
+        return int(val) if val else None
+
+    def set_ticket_channel_id(self, report_id: int, channel_id: Optional[int]) -> None:
+        cur = self.conn.cursor()
+        cur.execute("UPDATE reports SET ticket_channel_id=? WHERE id=?", (channel_id, int(report_id)))
+        self.conn.commit()
 
     # ---------------- Report pings ----------------
 
@@ -232,7 +275,7 @@ class ReportDB:
         self._set_setting("report_pings_enabled", new_val)
         return new_val == "1"
 
-    # ---------------- Blocks (kept for compatibility) ----------------
+    # ---------------- Block system ----------------
 
     def block_user(
         self,
@@ -245,7 +288,7 @@ class ReportDB:
     ) -> None:
         expires_at = None
         if not permanent and duration_minutes:
-            expires_at = (datetime.now(timezone.utc) + timedelta(minutes=duration_minutes)).isoformat()
+            expires_at = (datetime.now(timezone.utc) + timedelta(minutes=int(duration_minutes))).isoformat()
 
         cur = self.conn.cursor()
         cur.execute(
@@ -259,15 +302,7 @@ class ReportDB:
                           blocked_by=excluded.blocked_by,
                           created_at=excluded.created_at
             """,
-            (
-                int(guild_id),
-                int(user_id),
-                1 if permanent else 0,
-                expires_at,
-                reason,
-                blocked_by,
-                _utcnow_iso(),
-            ),
+            (int(guild_id), int(user_id), 1 if permanent else 0, expires_at, reason, blocked_by, _utcnow_iso()),
         )
         self.conn.commit()
 
@@ -345,16 +380,12 @@ class ReportDB:
 
     def get_liveboard(self, guild_id: int):
         cur = self.conn.cursor()
-        cur.execute(
-            "SELECT guild_id, channel_id, message_id FROM liveboards WHERE guild_id=?",
-            (int(guild_id),),
-        )
+        cur.execute("SELECT guild_id, channel_id, message_id FROM liveboards WHERE guild_id=?", (int(guild_id),))
         row = cur.fetchone()
         if not row:
             return None
         return {"guild_id": row["guild_id"], "channel_id": row["channel_id"], "message_id": row["message_id"]}
 
-    # Compatibility method expected by liveboard loop
     def list_liveboards(self) -> list[dict]:
         cur = self.conn.cursor()
         cur.execute("SELECT guild_id, channel_id, message_id FROM liveboards")
@@ -365,53 +396,3 @@ class ReportDB:
         cur = self.conn.cursor()
         cur.execute("DELETE FROM liveboards WHERE guild_id=?", (int(guild_id),))
         self.conn.commit()
-
-    def list_active_reports(self, guild_id: int, closed_statuses: set[str]):
-        closed = tuple(closed_statuses)
-        placeholders = ",".join("?" for _ in closed)
-
-        cur = self.conn.cursor()
-        cur.execute(
-            f"""
-            SELECT id, report_type, {self._payload_col} AS payload_blob, status,
-                   staff_message_id, created_at
-            FROM reports
-            WHERE guild_id = ?
-              AND status NOT IN ({placeholders})
-            ORDER BY id DESC
-            """,
-            (int(guild_id), *closed),
-        )
-
-        results = []
-        for row in cur.fetchall():
-            raw_payload = row["payload_blob"]
-            try:
-                payload = json.loads(raw_payload) if raw_payload else {}
-            except Exception:
-                payload = {}
-
-            rtype = (row["report_type"] or "").upper()
-
-            if rtype == "TV":
-                subject = payload.get("channel_name") or payload.get("channel") or "Unknown"
-            elif rtype == "VOD":
-                subject = payload.get("title") or "Unknown"
-            else:
-                subject = "Unknown"
-
-            created_dt = _try_parse_iso(row["created_at"] if "created_at" in row.keys() else None)
-
-            results.append(
-                {
-                    "id": row["id"],
-                    "report_type": rtype,
-                    "payload": payload,
-                    "status": row["status"] if "status" in row.keys() else "Open",
-                    "staff_message_id": row["staff_message_id"] if "staff_message_id" in row.keys() else None,
-                    "subject": subject,
-                    "created_at_dt": created_dt,
-                }
-            )
-
-        return results

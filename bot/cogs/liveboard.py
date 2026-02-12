@@ -7,7 +7,8 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 
-CLOSED_STATUSES = {"Resolved", "Can't replicate"}
+# Only "Resolved" is considered closed in your current workflow
+CLOSED_STATUSES = {"Resolved"}
 
 
 def _is_staff(member: discord.Member, staff_role_id: int) -> bool:
@@ -63,7 +64,7 @@ class LiveboardCog(commands.Cog):
             title="📡 Liveboard — Active Reports",
             description=(
                 "This board updates automatically.\n"
-                f"Closed reports (**Resolved** / **Can’t replicate**) are removed.\n\n"
+                "Reports marked **Resolved** are removed.\n\n"
                 f"Last update: {_ts(_utcnow())}"
             ),
         )
@@ -153,7 +154,6 @@ class LiveboardCog(commands.Cog):
         if not _is_staff(interaction.user, self.cfg.staff_role_id):
             return await interaction.response.send_message("❌ Not allowed.", ephemeral=True)
 
-        # Create message now
         reports = self.db.list_active_reports(interaction.guild.id, closed_statuses=CLOSED_STATUSES)
         tv_rows = [r for r in reports if (r.get("report_type") or "").upper() == "TV"]
         vod_rows = [r for r in reports if (r.get("report_type") or "").upper() == "VOD"]
@@ -162,10 +162,7 @@ class LiveboardCog(commands.Cog):
         try:
             msg = await channel.send(embed=embed)
         except discord.Forbidden:
-            return await interaction.response.send_message(
-                "❌ I can’t post in that channel.",
-                ephemeral=True,
-            )
+            return await interaction.response.send_message("❌ I can’t post in that channel.", ephemeral=True)
 
         self.db.set_liveboard(interaction.guild.id, channel.id, msg.id)
         await interaction.response.send_message(f"✅ Liveboard started in {channel.mention}.", ephemeral=True)

@@ -7,7 +7,7 @@ from discord.ext import commands
 
 from bot.config import load_config
 from bot.db import ReportDB
-from bot.views import ReportActionView
+from bot.views import ReportActionView, TicketResolveView
 
 try:
     import aiohttp
@@ -15,7 +15,6 @@ except Exception:
     aiohttp = None  # type: ignore
 
 
-# --- Presence pools (tweak these any time) ---
 IPTV_FLAVOR = [
     "IPTV playlists",
     "Live TV",
@@ -41,13 +40,12 @@ LOCAL_CHANNELS = [
 ]
 
 
-DEFAULT_GUILD_ID_FOR_SYNC = 1457559352717086917  # your guild id you used previously
+DEFAULT_GUILD_ID_FOR_SYNC = 1457559352717086917
 
 
 class SigmaReportsBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
-        # message_content intent is NOT required for slash commands
         super().__init__(command_prefix="!", intents=intents)
 
         self.cfg = load_config()
@@ -57,20 +55,29 @@ class SigmaReportsBot(commands.Bot):
         self._presence_task: Optional[asyncio.Task] = None
 
     async def setup_hook(self) -> None:
-        # Persistent view for staff buttons
+        # Persistent views
         self.add_view(
             ReportActionView(
                 self.db,
                 self.cfg.staff_channel_id,
                 self.cfg.support_channel_id,
                 self.cfg.public_updates,
+                self.cfg.staff_role_id,
+            )
+        )
+        self.add_view(
+            TicketResolveView(
+                self.db,
+                self.cfg.staff_channel_id,
+                self.cfg.support_channel_id,
+                self.cfg.public_updates,
+                self.cfg.staff_role_id,
             )
         )
 
         # Load cogs
         await self.load_extension("bot.cogs.reports")
 
-        # Optional cogs (don’t crash if file missing)
         for ext in (
             "bot.cogs.moderation",
             "bot.cogs.panel",
@@ -81,7 +88,7 @@ class SigmaReportsBot(commands.Bot):
             except Exception as e:
                 print(f"⚠️  Skipping {ext}: {repr(e)}")
 
-        # Sync commands to a single guild for fast iteration
+        # Sync to a single guild for fast iteration
         guild_id = getattr(self.cfg, "guild_id", None) or DEFAULT_GUILD_ID_FOR_SYNC
         if guild_id:
             guild = discord.Object(id=int(guild_id))
@@ -94,24 +101,19 @@ class SigmaReportsBot(commands.Bot):
         else:
             print("⚠️  No guild_id configured; skipping guild sync.")
 
-        # Start rotating presence
         self._presence_task = asyncio.create_task(self._presence_rotator())
 
     async def on_ready(self):
         print(f"Logged in as {self.user} (ID: {self.user.id})")
 
-    # ---------------- Presence rotation (5 min) ----------------
-
     async def _presence_rotator(self):
         await self.wait_until_ready()
 
-        # Refresh TMDB cache on startup
         try:
             await self._refresh_tmdb_cache()
         except Exception as e:
             print("Presence: TMDB refresh failed:", repr(e))
 
-        # Then run every 5 minutes; refresh TMDB every 6 hours
         ticks = 0
         while not self.is_closed():
             try:
@@ -119,10 +121,9 @@ class SigmaReportsBot(commands.Bot):
             except Exception as e:
                 print("Presence: change_presence failed:", repr(e))
 
-            await asyncio.sleep(300)  # 5 minutes
+            await asyncio.sleep(300)
             ticks += 1
 
-            # every 6 hours (72 * 5min)
             if ticks % 72 == 0:
                 try:
                     await self._refresh_tmdb_cache()
@@ -149,19 +150,11 @@ class SigmaReportsBot(commands.Bot):
 
     async def _refresh_tmdb_cache(self):
         token = getattr(self.cfg, "tmdb_bearer_token", "") or ""
-        if not token:
+        if not token or aiohttp is None:
             self._tmdb_cache = []
             return
 
-        if aiohttp is None:
-            self._tmdb_cache = []
-            return
-
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "accept": "application/json",
-        }
-
+        headers = {"Authorization": f"Bearer {token}", "accept": "application/json"}
         urls = [
             "https://api.themoviedb.org/3/trending/movie/day",
             "https://api.themoviedb.org/3/trending/tv/day",
@@ -182,7 +175,6 @@ class SigmaReportsBot(commands.Bot):
                 except Exception:
                     continue
 
-        # Keep a small, deduped cache
         deduped = []
         seen = set()
         for t in titles:

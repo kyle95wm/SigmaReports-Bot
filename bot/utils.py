@@ -1,127 +1,143 @@
-from datetime import datetime, timezone
+from __future__ import annotations
+
 import discord
 
 
-def status_color(status: str) -> discord.Color:
-    s = (status or "").lower()
-    if s == "fixed":
-        return discord.Color.green()
-    if "can't" in s or "cant" in s:
-        return discord.Color.orange()
-    if "more info" in s:
-        return discord.Color.gold()
-    if s == "open":
-        return discord.Color.blurple()
-    return discord.Color.blurple()
-
-
 def report_subject(report_type: str, payload: dict) -> str:
-    if report_type == "tv":
-        return payload.get("channel_name", "Unknown channel")
-    if report_type == "vod":
-        return payload.get("title", "Unknown title")
+    rt = (report_type or "").lower()
+
+    if rt == "tv":
+        name = (payload or {}).get("channel_name") or "TV report"
+        return str(name)
+
+    if rt == "vod":
+        title = (payload or {}).get("title") or "VOD report"
+        return str(title)
+
     return "Report"
 
 
-async def try_dm(user: discord.User, content: str) -> bool:
+def _safe_channel_name(ch) -> str:
     try:
-        await user.send(content)
-        return True
-    except discord.Forbidden:
-        return False
+        return ch.mention  # type: ignore
+    except Exception:
+        try:
+            return f"#{ch.name}"  # type: ignore
+        except Exception:
+            return "Unknown"
 
 
-def _format_reference_link(payload: dict) -> str:
+def _as_user_label(user: discord.abc.User) -> str:
+    # user.name is fine; mention included separately in embed for clarity
+    return f"{user.mention} ({user.id})"
+
+
+def _normalize_report_type(rt: str) -> str:
+    rt = (rt or "").strip().lower()
+    if rt == "tv":
+        return "TV"
+    if rt == "vod":
+        return "VOD"
+    return rt.upper() if rt else "REPORT"
+
+
+def _ref_link_field(payload: dict) -> tuple[str, str] | None:
     """
-    Returns a human-friendly, clickable reference link.
-    Supports TheTVDB, TMDB, IMDb.
+    Shows the reference link as a nicer label instead of a raw URL.
+    Supports TheTVDB / TMDB / IMDb in the label.
     """
-    url = (
-        payload.get("reference_link")
-        or payload.get("thetvdb_link")
-        or payload.get("tvdb_link")
-    )
+    link = (payload or {}).get("reference_link")
+    if not link:
+        return None
 
-    if not url or not isinstance(url, str):
-        return "—"
+    link_str = str(link).strip()
+    if not link_str:
+        return None
 
-    url_l = url.lower()
-
-    if "thetvdb.com" in url_l:
+    label = "Reference"
+    lower = link_str.lower()
+    if "thetvdb" in lower:
         label = "TheTVDB"
-    elif "themoviedb.org" in url_l or "tmdb.org" in url_l:
+    elif "themoviedb" in lower or "tmdb" in lower:
         label = "TMDB"
-    elif "imdb.com" in url_l:
+    elif "imdb" in lower:
         label = "IMDb"
-    else:
-        label = "Reference link"
 
-    # Discord supports Markdown links in embeds
-    return f"[{label}]({url})"
+    # Discord embed links: [label](url)
+    return ("Reference", f"[{label}]({link_str})")
+
+
+async def try_dm(user: discord.abc.User, message: str) -> bool:
+    try:
+        await user.send(message)
+        return True
+    except Exception:
+        return False
 
 
 def build_staff_embed(
     report_id: int,
     report_type: str,
-    reporter: discord.User,
-    source_channel: discord.abc.GuildChannel,
+    reporter: discord.abc.User,
+    source_channel,
     payload: dict,
-    status: str = "Open",
+    status: str,
+    ticket_channel_id: int | None = None,
 ) -> discord.Embed:
+    """
+    Staff channel embed.
+
+    NOTE: status text comes from the DB (Open / Ticket Open / Resolved / etc.)
+    The ticket_channel_id is optional; if you pass it, we'll show a Ticket field.
+    """
+    rt = _normalize_report_type(report_type)
     subject = report_subject(report_type, payload)
 
-    embed = discord.Embed(
-        title=f"Report #{report_id} — {report_type.upper()} — {subject}",
-        color=status_color(status),
-        timestamp=datetime.now(timezone.utc),
-    )
+    title = f"Report #{report_id} — {rt} — {subject}"
+    embed = discord.Embed(title=title)
 
-    embed.add_field(name="Status", value=status, inline=True)
-    embed.add_field(
-        name="Reporter",
-        value=f"{reporter.mention} (`{reporter.id}`)",
-        inline=False,
-    )
-    embed.add_field(
-        name="Reported from",
-        value=source_channel.mention if source_channel else "Unknown",
-        inline=False,
-    )
+    embed.add_field(name="Status", value=str(status or "Open"), inline=False)
+    embed.add_field(name="Reporter", value=_as_user_label(reporter), inline=False)
+    embed.add_field(name="Reported from", value=_safe_channel_name(source_channel), inline=False)
 
-    if report_type == "tv":
-        embed.add_field(name="Channel", value=payload.get("channel_name", "—"), inline=True)
-        embed.add_field(name="Category", value=payload.get("channel_category", "—"), inline=True)
-        embed.add_field(name="Issue", value=payload.get("issue", "—"), inline=False)
+    # TV fields
+    if rt == "TV":
+        ch_name = (payload or {}).get("channel_name") or "Unknown"
+        ch_cat = (payload or {}).get("channel_category") or "Unknown"
+        issue = (payload or {}).get("issue") or "—"
 
-    if report_type == "vod":
-        embed.add_field(name="Title", value=payload.get("title", "—"), inline=False)
-        embed.add_field(name="Quality", value=payload.get("quality", "—"), inline=True)
+        embed.add_field(name="Channel", value=str(ch_name), inline=True)
+        embed.add_field(name="Category", value=str(ch_cat), inline=True)
+        embed.add_field(name="Issue", value=str(issue), inline=False)
 
-        # ✅ Clickable, labeled reference link
-        embed.add_field(
-            name="Reference",
-            value=_format_reference_link(payload),
-            inline=False,
-        )
+    # VOD fields
+    if rt == "VOD":
+        vod_title = (payload or {}).get("title") or "Unknown"
+        quality = (payload or {}).get("quality") or "Unknown"
+        issue = (payload or {}).get("issue") or "—"
 
-        embed.add_field(name="Issue", value=payload.get("issue", "—"), inline=False)
+        embed.add_field(name="Title", value=str(vod_title), inline=False)
+        embed.add_field(name="Quality", value=str(quality), inline=True)
 
+        ref = _ref_link_field(payload)
+        if ref:
+            embed.add_field(name=ref[0], value=ref[1], inline=True)
+
+        embed.add_field(name="Issue", value=str(issue), inline=False)
+
+    # Ticket field (only if we know it)
+    if ticket_channel_id:
+        embed.add_field(name="Ticket", value=f"<#{int(ticket_channel_id)}>", inline=False)
+
+    # Updated staff actions (matches your new workflow)
     embed.add_field(
         name="Staff actions",
         value=(
-            "✅ **Fixed** — Issue confirmed and resolved (closes the report)\n"
-            "⚠️ **Can't replicate** — Issue could not be reproduced (closes the report)\n"
-            "📝 **More info required** — Ask the user to submit a new report with more details\n"
-            "💬 **Send follow-up** — Send one-way status updates **without closing the report**"
+            "✅ **Resolved** — closes the report\n"
+            "🎫 **Open ticket** — creates a private ticket channel for staff + the reporter\n\n"
+            "When the ticket is finished, use **Resolve** in the ticket to close it and mark the report as **Resolved**."
         ),
         inline=False,
-    )
-
-    embed.set_footer(
-        text=(
-            "Follow-ups are one-way updates to the reporter. "
-            "Only Fixed or Can't replicate closes the report."
-        )
     )
 
     return embed
