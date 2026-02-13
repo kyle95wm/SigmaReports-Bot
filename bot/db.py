@@ -188,6 +188,14 @@ class ReportDB:
         cur.execute("SELECT * FROM reports WHERE staff_message_id=?", (int(staff_message_id),))
         return self._row_to_report(cur.fetchone())
 
+    def _compute_subject(self, report_type: str, payload: dict) -> str:
+        rt = (report_type or "").upper().strip()
+        if rt == "TV":
+            return (payload.get("channel_name") or "").strip() or "Unknown"
+        if rt == "VOD":
+            return (payload.get("title") or "").strip() or "Unknown"
+        return "Unknown"
+
     def _row_to_report(self, row):
         if not row:
             return None
@@ -198,17 +206,25 @@ class ReportDB:
         except Exception:
             payload = {}
 
+        report_type = (row["report_type"] if "report_type" in row.keys() else "").upper().strip()
+        created_at = row[self._created_at_col] if self._created_at_col in row.keys() else None
+        created_at_dt = _try_parse_iso(created_at)
+
         out = {
             "id": row["id"],
-            "report_type": row["report_type"],
+            "report_type": report_type,
             "reporter_id": row["reporter_id"],
             "guild_id": row["guild_id"],
             "source_channel_id": row["source_channel_id"],
             "payload": payload,
             "status": row["status"] if "status" in row.keys() else "Open",
             "staff_message_id": row["staff_message_id"] if "staff_message_id" in row.keys() else None,
-            "created_at": row["created_at"] if "created_at" in row.keys() else None,
+            "created_at": created_at,
             "updated_at": row["updated_at"] if "updated_at" in row.keys() else None,
+
+            # ✅ these are what your liveboard wants
+            "subject": self._compute_subject(report_type, payload),
+            "created_at_dt": created_at_dt,
         }
 
         if "ticket_channel_id" in row.keys():
