@@ -157,7 +157,7 @@ class TicketResolveView(discord.ui.View):
                         source,
                         report["payload"],
                         "Resolved",
-                        ticket_channel_id=ticket_id,
+                        ticket_channel_id=None,
                         claimed_by_user_id=claimed_by,
                         claimed_at=claimed_at,
                         resolved_by_id=resolver_id,
