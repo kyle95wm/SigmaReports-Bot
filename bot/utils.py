@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import discord
+from datetime import datetime, timezone
+from typing import Optional
 
 
 def report_subject(report_type: str, payload: dict) -> str:
@@ -28,7 +30,6 @@ def _safe_channel_name(ch) -> str:
 
 
 def _as_user_label(user: discord.abc.User) -> str:
-    # user.name is fine; mention included separately in embed for clarity
     return f"{user.mention} ({user.id})"
 
 
@@ -42,10 +43,6 @@ def _normalize_report_type(rt: str) -> str:
 
 
 def _ref_link_field(payload: dict) -> tuple[str, str] | None:
-    """
-    Shows the reference link as a nicer label instead of a raw URL.
-    Supports TheTVDB / TMDB / IMDb in the label.
-    """
     link = (payload or {}).get("reference_link")
     if not link:
         return None
@@ -63,8 +60,19 @@ def _ref_link_field(payload: dict) -> tuple[str, str] | None:
     elif "imdb" in lower:
         label = "IMDb"
 
-    # Discord embed links: [label](url)
     return ("Reference", f"[{label}]({link_str})")
+
+
+def _iso_to_discord_ts(iso: Optional[str]) -> Optional[str]:
+    if not iso:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(iso))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return f"<t:{int(dt.timestamp())}:R>"
+    except Exception:
+        return None
 
 
 async def try_dm(user: discord.abc.User, message: str) -> bool:
@@ -83,13 +91,10 @@ def build_staff_embed(
     payload: dict,
     status: str,
     ticket_channel_id: int | None = None,
+    claimed_by_user_id: int | None = None,
+    claimed_at: str | None = None,
+    resolved_by_id: int | None = None,
 ) -> discord.Embed:
-    """
-    Staff channel embed.
-
-    NOTE: status text comes from the DB (Open / Ticket Open / Resolved / etc.)
-    The ticket_channel_id is optional; if you pass it, we'll show a Ticket field.
-    """
     rt = _normalize_report_type(report_type)
     subject = report_subject(report_type, payload)
 
@@ -97,10 +102,22 @@ def build_staff_embed(
     embed = discord.Embed(title=title)
 
     embed.add_field(name="Status", value=str(status or "Open"), inline=False)
+
+    # Claim info (optional)
+    if claimed_by_user_id:
+        claim_line = f"<@{int(claimed_by_user_id)}>"
+        ts = _iso_to_discord_ts(claimed_at)
+        if ts:
+            claim_line += f" • {ts}"
+        embed.add_field(name="Claimed by", value=claim_line, inline=False)
+
+    # Resolver info (optional)
+    if (status or "").strip().lower() == "resolved" and resolved_by_id:
+        embed.add_field(name="Resolved by", value=f"<@{int(resolved_by_id)}>", inline=False)
+
     embed.add_field(name="Reporter", value=_as_user_label(reporter), inline=False)
     embed.add_field(name="Reported from", value=_safe_channel_name(source_channel), inline=False)
 
-    # TV fields
     if rt == "TV":
         ch_name = (payload or {}).get("channel_name") or "Unknown"
         ch_cat = (payload or {}).get("channel_category") or "Unknown"
@@ -110,7 +127,6 @@ def build_staff_embed(
         embed.add_field(name="Category", value=str(ch_cat), inline=True)
         embed.add_field(name="Issue", value=str(issue), inline=False)
 
-    # VOD fields
     if rt == "VOD":
         vod_title = (payload or {}).get("title") or "Unknown"
         quality = (payload or {}).get("quality") or "Unknown"
@@ -125,11 +141,9 @@ def build_staff_embed(
 
         embed.add_field(name="Issue", value=str(issue), inline=False)
 
-    # Ticket field (only if we know it)
     if ticket_channel_id:
         embed.add_field(name="Ticket", value=f"<#{int(ticket_channel_id)}>", inline=False)
 
-    # Updated staff actions (matches your new workflow)
     embed.add_field(
         name="Staff actions",
         value=(

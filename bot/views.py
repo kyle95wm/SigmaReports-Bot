@@ -6,10 +6,7 @@ from bot.db import ReportDB
 from bot.utils import build_staff_embed, report_subject, try_dm
 
 
-# legacy-safe (older DB rows may still have these)
 CLOSED_STATUSES = {"Resolved", "Can't replicate", "Fixed"}
-
-# Ticket category (channels will be created under here)
 TICKETS_CATEGORY_ID = 1458642805437239397
 
 
@@ -25,15 +22,7 @@ def _nice_ref_label(url: str) -> str:
     return "Reference"
 
 
-def _build_ticket_embed(
-    report: dict,
-    reporter: discord.abc.User,
-    guild: discord.Guild,
-) -> discord.Embed:
-    """
-    Ticket header embed shown in the ticket channel.
-    Includes the original report details so staff don't have to go back to the staff channel.
-    """
+def _build_ticket_embed(report: dict, reporter: discord.abc.User, guild: discord.Guild) -> discord.Embed:
     rid = int(report["id"])
     rtype = str(report["report_type"] or "").upper()
     payload = report.get("payload") or {}
@@ -53,7 +42,6 @@ def _build_ticket_embed(
         ),
     )
 
-    # Include the actual report details
     if rtype == "TV":
         ch_name = (payload.get("channel_name") or "Unknown").strip()
         ch_cat = (payload.get("channel_category") or "Unknown").strip()
@@ -78,39 +66,11 @@ def _build_ticket_embed(
 
         embed.add_field(name="Issue", value=issue[:1024] if issue else "—", inline=False)
 
-    else:
-        # Fallback: dump whatever payload keys exist (lightly)
-        if isinstance(payload, dict) and payload:
-            lines = []
-            for k, v in payload.items():
-                if v is None:
-                    continue
-                s = str(v).strip()
-                if not s:
-                    continue
-                lines.append(f"**{k}:** {s}")
-            if lines:
-                embed.add_field(name="Details", value="\n".join(lines)[:1024], inline=False)
-
     return embed
 
 
 class TicketResolveView(discord.ui.View):
-    """
-    View used inside ticket channels. Single Resolve button:
-    - Marks report Resolved
-    - Updates staff report message embed + disables buttons
-    - Deletes the ticket channel
-    """
-
-    def __init__(
-        self,
-        db: ReportDB,
-        staff_channel_id: int,
-        support_channel_id: int,
-        public_updates: bool,
-        staff_role_id: int,
-    ):
+    def __init__(self, db: ReportDB, staff_channel_id: int, support_channel_id: int, public_updates: bool, staff_role_id: int):
         super().__init__(timeout=None)
         self.db = db
         self.staff_channel_id = int(staff_channel_id or 0)
@@ -150,10 +110,10 @@ class TicketResolveView(discord.ui.View):
         if not report:
             return await interaction.response.send_message("❌ Report not found.", ephemeral=True)
 
-        # Mark resolved in DB
-        self.db.update_status(report_id, "Resolved")
+        resolver_id = int(interaction.user.id)
+        self.db.mark_resolved(report_id, resolver_id)
 
-        # Try update staff message embed + disable buttons
+        # Update staff message
         if self.staff_channel_id and report.get("staff_message_id"):
             try:
                 staff_channel = interaction.guild.get_channel(self.staff_channel_id)
@@ -177,6 +137,7 @@ class TicketResolveView(discord.ui.View):
                         report["payload"],
                         "Resolved",
                         ticket_channel_id=ticket_id,
+                        resolved_by_id=resolver_id,
                     )
 
                     view = ReportActionView(
@@ -192,7 +153,7 @@ class TicketResolveView(discord.ui.View):
             except Exception:
                 pass
 
-        # Notify reporter (DM best-effort)
+        # DM reporter
         try:
             reporter = await interaction.client.fetch_user(int(report["reporter_id"]))
             subj = report_subject(report["report_type"], report["payload"])
@@ -200,7 +161,6 @@ class TicketResolveView(discord.ui.View):
         except Exception:
             pass
 
-        # Clear ticket reference
         try:
             self.db.set_ticket_channel_id(report_id, None)
         except Exception:
@@ -208,11 +168,9 @@ class TicketResolveView(discord.ui.View):
 
         await interaction.response.send_message("✅ Resolved. Closing ticket…", ephemeral=True)
 
-        # Delete the ticket channel
         try:
             await interaction.channel.delete(reason=f"Resolved ticket for report #{report_id}")
         except discord.Forbidden:
-            # If cannot delete, at least rename
             try:
                 await interaction.channel.edit(name=f"closed-report-{report_id}")
             except Exception:
@@ -220,31 +178,7 @@ class TicketResolveView(discord.ui.View):
 
 
 class ReportActionView(discord.ui.View):
-    """
-    Staff report message actions:
-
-    - Resolved
-    - Open ticket
-
-    Open ticket:
-      - creates a private channel (under TICKETS_CATEGORY_ID if possible)
-      - pings ONLY the reporter
-      - posts a Resolve button inside the ticket
-      - updates staff report status to "Ticket Open"
-      - disables Open ticket button (Resolved stays available)
-
-    NOTE:
-      - Resolving from the staff channel does NOT post a public update (DM only).
-    """
-
-    def __init__(
-        self,
-        db: ReportDB,
-        staff_channel_id: int,
-        support_channel_id: int,
-        public_updates: bool,
-        staff_role_id: int,
-    ):
+    def __init__(self, db: ReportDB, staff_channel_id: int, support_channel_id: int, public_updates: bool, staff_role_id: int):
         super().__init__(timeout=None)
         self.db = db
         self.staff_channel_id = int(staff_channel_id or 0)
@@ -280,11 +214,6 @@ class ReportActionView(discord.ui.View):
         return True
 
     async def _close_ticket_channel_if_any(self, guild: discord.Guild, report_id: int):
-        """
-        Best-effort: delete an open ticket channel for this report.
-        If we can't delete it, rename it so it's obviously closed.
-        Always clears the DB ticket_channel_id if it was set.
-        """
         ticket_id = None
         try:
             ticket_id = self.db.get_ticket_channel_id(report_id)
@@ -324,18 +253,16 @@ class ReportActionView(discord.ui.View):
             return await interaction.response.send_message("❌ Report not found.", ephemeral=True)
 
         report_id = int(report["id"])
+        resolver_id = int(interaction.user.id)
 
-        # ✅ Close ticket first (so embed doesn't point at a soon-to-be-deleted channel)
         await self._close_ticket_channel_if_any(interaction.guild, report_id)
 
-        # Mark resolved
-        self.db.update_status(report_id, "Resolved")
+        self.db.mark_resolved(report_id, resolver_id)
 
         reporter = await interaction.client.fetch_user(int(report["reporter_id"]))
         source = interaction.guild.get_channel(int(report["source_channel_id"])) or interaction.channel
         subject = report_subject(report["report_type"], report["payload"])
 
-        # After closing, ticket is cleared, so we don't show a dead link
         embed = build_staff_embed(
             report_id,
             report["report_type"],
@@ -344,12 +271,12 @@ class ReportActionView(discord.ui.View):
             report["payload"],
             "Resolved",
             ticket_channel_id=None,
+            resolved_by_id=resolver_id,
         )
 
         self.disable_all()
         await interaction.response.edit_message(embed=embed, view=self)
 
-        # ✅ DM only (no public post)
         await try_dm(reporter, f"✅ Update on your report #{report_id} ({subject}): **Resolved**.")
 
     @discord.ui.button(label="Open ticket", style=discord.ButtonStyle.primary, custom_id="report:ticket")
@@ -370,7 +297,6 @@ class ReportActionView(discord.ui.View):
         guild = interaction.guild
         reporter = await interaction.client.fetch_user(int(report["reporter_id"]))
 
-        # Ticket already exists?
         existing_id = self.db.get_ticket_channel_id(report["id"])
         if existing_id:
             ch = guild.get_channel(int(existing_id))
@@ -383,10 +309,7 @@ class ReportActionView(discord.ui.View):
             return await interaction.response.send_message("❌ Couldn’t read my permissions.", ephemeral=True)
 
         if not me.guild_permissions.manage_channels:
-            return await interaction.response.send_message(
-                "❌ I don’t have permission to create channels or set permissions.",
-                ephemeral=True,
-            )
+            return await interaction.response.send_message("❌ I don’t have permission to create channels or set permissions.", ephemeral=True)
 
         overwrites: dict[discord.abc.Snowflake, discord.PermissionOverwrite] = {
             guild.default_role: discord.PermissionOverwrite(view_channel=False),
@@ -398,7 +321,6 @@ class ReportActionView(discord.ui.View):
             if role:
                 overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
 
-        # Put tickets in the category (if the bot can see it)
         category = guild.get_channel(TICKETS_CATEGORY_ID)
         if not isinstance(category, discord.CategoryChannel):
             category = None
@@ -413,16 +335,12 @@ class ReportActionView(discord.ui.View):
                 reason=f"Ticket opened for report #{report['id']}",
             )
         except discord.Forbidden:
-            return await interaction.response.send_message(
-                "❌ I don’t have permission to create channels or set permissions.",
-                ephemeral=True,
-            )
+            return await interaction.response.send_message("❌ I don’t have permission to create channels or set permissions.", ephemeral=True)
         except Exception as e:
             return await interaction.response.send_message(f"❌ Failed to create ticket channel: {e!r}", ephemeral=True)
 
         self.db.set_ticket_channel_id(report["id"], ticket_channel.id)
 
-        # Ticket top message: ping ONLY reporter + detailed embed + Resolve button
         summary = _build_ticket_embed(report=report, reporter=reporter, guild=guild)
 
         resolve_view = TicketResolveView(
@@ -435,7 +353,6 @@ class ReportActionView(discord.ui.View):
 
         await ticket_channel.send(content=reporter.mention, embed=summary, view=resolve_view)
 
-        # Update staff message status to Ticket Open
         self.db.update_status(report["id"], "Ticket Open")
 
         source = guild.get_channel(int(report["source_channel_id"])) or interaction.channel
@@ -450,7 +367,6 @@ class ReportActionView(discord.ui.View):
             ticket_channel_id=ticket_channel.id,
         )
 
-        # Disable Open ticket only; keep Resolved active
         for child in self.children:
             if isinstance(child, discord.ui.Button) and child.custom_id == "report:ticket":
                 child.disabled = True

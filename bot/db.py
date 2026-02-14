@@ -17,14 +17,6 @@ def _try_parse_iso(s: Optional[str]) -> Optional[datetime]:
         return None
 
 
-def _row_get(row: sqlite3.Row, key: str, default=None):
-    # sqlite3.Row doesn't support .get()
-    try:
-        return row[key]
-    except Exception:
-        return default
-
-
 class ReportDB:
     def __init__(self, path: str):
         self.path = path
@@ -109,6 +101,8 @@ class ReportDB:
 
         # Newer features
         self._ensure_column("reports", "ticket_channel_id", "INTEGER")
+        self._ensure_column("reports", "resolved_by", "INTEGER")
+        self._ensure_column("reports", "resolved_at", "TEXT")
 
         # Default setting values
         if self._get_setting("report_pings_enabled") is None:
@@ -125,7 +119,6 @@ class ReportDB:
             self._payload_col = "payload_json"
 
         self._created_at_col = "created_at" if "created_at" in cols else "created_at"
-
         print(f"DB: reports payload column = '{self._payload_col}', created_at column = '{self._created_at_col}'")
 
     # ---------------- Settings ----------------
@@ -174,6 +167,22 @@ class ReportDB:
         cur.execute("UPDATE reports SET status=?, updated_at=? WHERE id=?", (status, _utcnow_iso(), int(report_id)))
         self.conn.commit()
 
+    def mark_resolved(self, report_id: int, staff_user_id: int) -> None:
+        now = _utcnow_iso()
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            UPDATE reports
+            SET status='Resolved',
+                resolved_by=?,
+                resolved_at=?,
+                updated_at=?
+            WHERE id=?
+            """,
+            (int(staff_user_id), now, now, int(report_id)),
+        )
+        self.conn.commit()
+
     def get_by_id(self, report_id: int):
         cur = self.conn.cursor()
         cur.execute("SELECT * FROM reports WHERE id=?", (int(report_id),))
@@ -188,14 +197,6 @@ class ReportDB:
         cur.execute("SELECT * FROM reports WHERE staff_message_id=?", (int(staff_message_id),))
         return self._row_to_report(cur.fetchone())
 
-    def _compute_subject(self, report_type: str, payload: dict) -> str:
-        rt = (report_type or "").upper().strip()
-        if rt == "TV":
-            return (payload.get("channel_name") or "").strip() or "Unknown"
-        if rt == "VOD":
-            return (payload.get("title") or "").strip() or "Unknown"
-        return "Unknown"
-
     def _row_to_report(self, row):
         if not row:
             return None
@@ -206,29 +207,27 @@ class ReportDB:
         except Exception:
             payload = {}
 
-        report_type = (row["report_type"] if "report_type" in row.keys() else "").upper().strip()
-        created_at = row[self._created_at_col] if self._created_at_col in row.keys() else None
-        created_at_dt = _try_parse_iso(created_at)
-
         out = {
             "id": row["id"],
-            "report_type": report_type,
+            "report_type": row["report_type"],
             "reporter_id": row["reporter_id"],
             "guild_id": row["guild_id"],
             "source_channel_id": row["source_channel_id"],
             "payload": payload,
             "status": row["status"] if "status" in row.keys() else "Open",
             "staff_message_id": row["staff_message_id"] if "staff_message_id" in row.keys() else None,
-            "created_at": created_at,
+            "created_at": row["created_at"] if "created_at" in row.keys() else None,
             "updated_at": row["updated_at"] if "updated_at" in row.keys() else None,
-
-            # ✅ these are what your liveboard wants
-            "subject": self._compute_subject(report_type, payload),
-            "created_at_dt": created_at_dt,
         }
 
         if "ticket_channel_id" in row.keys():
             out["ticket_channel_id"] = row["ticket_channel_id"]
+
+        if "resolved_by" in row.keys():
+            out["resolved_by"] = row["resolved_by"]
+
+        if "resolved_at" in row.keys():
+            out["resolved_at"] = row["resolved_at"]
 
         return out
 

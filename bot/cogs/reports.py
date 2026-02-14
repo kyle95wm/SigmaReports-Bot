@@ -217,6 +217,11 @@ class Reports(commands.Cog):
 
         source = interaction.guild.get_channel(report["source_channel_id"]) or staff_ch
 
+        # Pull ticket + claim info if present (for cosmetic display)
+        ticket_channel_id = report.get("ticket_channel_id")
+        claimed_by_user_id = report.get("claimed_by_user_id")
+        claimed_at = report.get("claimed_at")
+
         embed = build_staff_embed(
             report["id"],
             report["report_type"],
@@ -224,9 +229,11 @@ class Reports(commands.Cog):
             source,
             report["payload"],
             "Open",
+            ticket_channel_id=ticket_channel_id if ticket_channel_id else None,
+            claimed_by_user_id=claimed_by_user_id if claimed_by_user_id else None,
+            claimed_at=claimed_at if claimed_at else None,
         )
 
-        # ✅ FIXED: now includes staff_role_id
         view = ReportActionView(
             self.db,
             self.cfg.staff_channel_id,
