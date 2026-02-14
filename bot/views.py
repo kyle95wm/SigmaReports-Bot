@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 import discord
 
 from bot.db import ReportDB
@@ -8,6 +10,10 @@ from bot.utils import build_staff_embed, report_subject, try_dm
 
 CLOSED_STATUSES = {"Resolved", "Can't replicate", "Fixed"}
 TICKETS_CATEGORY_ID = 1458642805437239397
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _nice_ref_label(url: str) -> str:
@@ -24,9 +30,9 @@ def _nice_ref_label(url: str) -> str:
 
 def _build_ticket_embed(report: dict, reporter: discord.abc.User, guild: discord.Guild) -> discord.Embed:
     rid = int(report["id"])
-    rtype = str(report["report_type"] or "").upper()
+    rtype = str(report.get("report_type") or "").upper()
     payload = report.get("payload") or {}
-    subject = report_subject(report["report_type"], payload)
+    subject = report_subject(report.get("report_type") or "", payload)
 
     src = guild.get_channel(int(report["source_channel_id"])) if report.get("source_channel_id") else None
     src_text = src.mention if isinstance(src, discord.TextChannel) else "Unknown"
@@ -70,7 +76,14 @@ def _build_ticket_embed(report: dict, reporter: discord.abc.User, guild: discord
 
 
 class TicketResolveView(discord.ui.View):
-    def __init__(self, db: ReportDB, staff_channel_id: int, support_channel_id: int, public_updates: bool, staff_role_id: int):
+    def __init__(
+        self,
+        db: ReportDB,
+        staff_channel_id: int,
+        support_channel_id: int,
+        public_updates: bool,
+        staff_role_id: int,
+    ):
         super().__init__(timeout=None)
         self.db = db
         self.staff_channel_id = int(staff_channel_id or 0)
@@ -111,7 +124,11 @@ class TicketResolveView(discord.ui.View):
             return await interaction.response.send_message("❌ Report not found.", ephemeral=True)
 
         resolver_id = int(interaction.user.id)
-        self.db.mark_resolved(report_id, resolver_id)
+        # If your DB has mark_resolved, use it. Otherwise fall back.
+        if hasattr(self.db, "mark_resolved"):
+            self.db.mark_resolved(report_id, resolver_id)  # type: ignore[attr-defined]
+        else:
+            self.db.update_status(report_id, "Resolved")
 
         # Update staff message
         if self.staff_channel_id and report.get("staff_message_id"):
@@ -129,6 +146,10 @@ class TicketResolveView(discord.ui.View):
                     except Exception:
                         ticket_id = None
 
+                    # Pull claim info if your DB/report dict has it (defensive)
+                    claimed_by = report.get("claimed_by_user_id")
+                    claimed_at = report.get("claimed_at")
+
                     embed = build_staff_embed(
                         report_id,
                         report["report_type"],
@@ -137,6 +158,8 @@ class TicketResolveView(discord.ui.View):
                         report["payload"],
                         "Resolved",
                         ticket_channel_id=ticket_id,
+                        claimed_by_user_id=claimed_by,
+                        claimed_at=claimed_at,
                         resolved_by_id=resolver_id,
                     )
 
@@ -178,7 +201,14 @@ class TicketResolveView(discord.ui.View):
 
 
 class ReportActionView(discord.ui.View):
-    def __init__(self, db: ReportDB, staff_channel_id: int, support_channel_id: int, public_updates: bool, staff_role_id: int):
+    def __init__(
+        self,
+        db: ReportDB,
+        staff_channel_id: int,
+        support_channel_id: int,
+        public_updates: bool,
+        staff_role_id: int,
+    ):
         super().__init__(timeout=None)
         self.db = db
         self.staff_channel_id = int(staff_channel_id or 0)
@@ -257,11 +287,17 @@ class ReportActionView(discord.ui.View):
 
         await self._close_ticket_channel_if_any(interaction.guild, report_id)
 
-        self.db.mark_resolved(report_id, resolver_id)
+        if hasattr(self.db, "mark_resolved"):
+            self.db.mark_resolved(report_id, resolver_id)  # type: ignore[attr-defined]
+        else:
+            self.db.update_status(report_id, "Resolved")
 
         reporter = await interaction.client.fetch_user(int(report["reporter_id"]))
         source = interaction.guild.get_channel(int(report["source_channel_id"])) or interaction.channel
         subject = report_subject(report["report_type"], report["payload"])
+
+        claimed_by = report.get("claimed_by_user_id")
+        claimed_at = report.get("claimed_at")
 
         embed = build_staff_embed(
             report_id,
@@ -271,6 +307,8 @@ class ReportActionView(discord.ui.View):
             report["payload"],
             "Resolved",
             ticket_channel_id=None,
+            claimed_by_user_id=claimed_by,
+            claimed_at=claimed_at,
             resolved_by_id=resolver_id,
         )
 
@@ -353,6 +391,17 @@ class ReportActionView(discord.ui.View):
 
         await ticket_channel.send(content=reporter.mention, embed=summary, view=resolve_view)
 
+        # Claim info (cosmetic): record + show on embed
+        claimed_by_user_id = int(interaction.user.id)
+        claimed_at = _now_iso()
+
+        # Best-effort: if your DB has a claim method/columns, write it; otherwise just show it on the embed.
+        if hasattr(self.db, "mark_claimed"):
+            try:
+                self.db.mark_claimed(int(report["id"]), claimed_by_user_id, claimed_at)  # type: ignore[attr-defined]
+            except Exception:
+                pass
+
         self.db.update_status(report["id"], "Ticket Open")
 
         source = guild.get_channel(int(report["source_channel_id"])) or interaction.channel
@@ -365,6 +414,8 @@ class ReportActionView(discord.ui.View):
             report["payload"],
             "Ticket Open",
             ticket_channel_id=ticket_channel.id,
+            claimed_by_user_id=claimed_by_user_id,
+            claimed_at=claimed_at,
         )
 
         for child in self.children:
