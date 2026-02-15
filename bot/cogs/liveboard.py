@@ -6,6 +6,8 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
+from bot.utils import report_subject
+
 
 # Only "Resolved" is considered closed in your current workflow
 CLOSED_STATUSES = {"Resolved"}
@@ -17,6 +19,18 @@ def _is_staff(member: discord.Member, staff_role_id: int) -> bool:
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _parse_iso_dt(s: Optional[str]) -> Optional[datetime]:
+    if not s:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(s))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except Exception:
+        return None
 
 
 def _ts(dt: Optional[datetime]) -> str:
@@ -47,14 +61,19 @@ class LiveboardCog(commands.Cog):
 
     def _format_row(self, guild_id: int, r: dict) -> str:
         rid = r.get("id")
-        status = r.get("status") or "Open"
-        subject = r.get("subject") or "Unknown"
-        age = r.get("created_at_dt")  # datetime or None
+        status = (r.get("status") or "Open").strip()
+
+        payload = r.get("payload") or {}
+        rtype = (r.get("report_type") or "").strip()
+        subject = report_subject(rtype, payload)
+
+        # DB gives created_at as ISO string; parse it
+        created_dt = _parse_iso_dt(r.get("created_at"))
         link = self._staff_jump_link(guild_id, r.get("staff_message_id"))
 
         parts = [f"**#{rid}**", f"`{status}`", subject]
-        if age:
-            parts.append(_ts(age))
+        if created_dt:
+            parts.append(_ts(created_dt))
         if link:
             parts.append(f"[staff]({link})")
         return " • ".join(parts)
@@ -110,8 +129,8 @@ class LiveboardCog(commands.Cog):
         # Pull active reports (excluding closed)
         reports = self.db.list_active_reports(guild_id, closed_statuses=CLOSED_STATUSES)
 
-        tv_rows = [r for r in reports if (r.get("report_type") or "").upper() == "TV"]
-        vod_rows = [r for r in reports if (r.get("report_type") or "").upper() == "VOD"]
+        tv_rows = [r for r in reports if (r.get("report_type") or "").strip().upper() == "TV"]
+        vod_rows = [r for r in reports if (r.get("report_type") or "").strip().upper() == "VOD"]
 
         embed = self.build_liveboard_embed(guild_id, tv_rows, vod_rows)
 
@@ -119,10 +138,8 @@ class LiveboardCog(commands.Cog):
             msg = await channel.fetch_message(message_id)
             await msg.edit(embed=embed, view=None)
         except discord.NotFound:
-            # message deleted: stop tracking
             self.db.clear_liveboard(guild_id)
         except discord.Forbidden:
-            # can't edit in that channel
             pass
 
     @tasks.loop(minutes=3)
@@ -155,8 +172,8 @@ class LiveboardCog(commands.Cog):
             return await interaction.response.send_message("❌ Not allowed.", ephemeral=True)
 
         reports = self.db.list_active_reports(interaction.guild.id, closed_statuses=CLOSED_STATUSES)
-        tv_rows = [r for r in reports if (r.get("report_type") or "").upper() == "TV"]
-        vod_rows = [r for r in reports if (r.get("report_type") or "").upper() == "VOD"]
+        tv_rows = [r for r in reports if (r.get("report_type") or "").strip().upper() == "TV"]
+        vod_rows = [r for r in reports if (r.get("report_type") or "").strip().upper() == "VOD"]
         embed = self.build_liveboard_embed(interaction.guild.id, tv_rows, vod_rows)
 
         try:
