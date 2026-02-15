@@ -94,6 +94,7 @@ def build_staff_embed(
     claimed_by_user_id: int | None = None,
     claimed_at: str | None = None,
     resolved_by_id: int | None = None,
+    resolved_note: str | None = None,
 ) -> discord.Embed:
     rt = _normalize_report_type(report_type)
     subject = report_subject(report_type, payload)
@@ -101,7 +102,8 @@ def build_staff_embed(
     title = f"Report #{report_id} — {rt} — {subject}"
     embed = discord.Embed(title=title)
 
-    embed.add_field(name="Status", value=str(status or "Open"), inline=False)
+    status_txt = str(status or "Open")
+    embed.add_field(name="Status", value=status_txt, inline=False)
 
     # Claim info (optional)
     if claimed_by_user_id:
@@ -112,8 +114,12 @@ def build_staff_embed(
         embed.add_field(name="Claimed by", value=claim_line, inline=False)
 
     # Resolver info (optional)
-    if (status or "").strip().lower() == "resolved" and resolved_by_id:
+    if status_txt.strip().lower() == "resolved" and resolved_by_id:
         embed.add_field(name="Resolved by", value=f"<@{int(resolved_by_id)}>", inline=False)
+
+    # Resolution details (optional)
+    if status_txt.strip().lower() == "resolved" and resolved_note:
+        embed.add_field(name="Resolution details", value=str(resolved_note)[:1024], inline=False)
 
     embed.add_field(name="Reporter", value=_as_user_label(reporter), inline=False)
     embed.add_field(name="Reported from", value=_safe_channel_name(source_channel), inline=False)
@@ -141,7 +147,8 @@ def build_staff_embed(
 
         embed.add_field(name="Issue", value=str(issue), inline=False)
 
-    if ticket_channel_id:
+    # Ticket field (only if we know it AND it makes sense to show)
+    if ticket_channel_id and status_txt.strip().lower() != "resolved":
         embed.add_field(name="Ticket", value=f"<#{int(ticket_channel_id)}>", inline=False)
 
     embed.add_field(

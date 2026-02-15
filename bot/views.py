@@ -123,81 +123,20 @@ class TicketResolveView(discord.ui.View):
         if not report:
             return await interaction.response.send_message("❌ Report not found.", ephemeral=True)
 
-        resolver_id = int(interaction.user.id)
-        # If your DB has mark_resolved, use it. Otherwise fall back.
-        if hasattr(self.db, "mark_resolved"):
-            self.db.mark_resolved(report_id, resolver_id)  # type: ignore[attr-defined]
-        else:
-            self.db.update_status(report_id, "Resolved")
+        # Open modal instead of resolving immediately
+        from bot.modals import ResolveReportModal  # lazy import to avoid circulars
 
-        # Update staff message
-        if self.staff_channel_id and report.get("staff_message_id"):
-            try:
-                staff_channel = interaction.guild.get_channel(self.staff_channel_id)
-                if isinstance(staff_channel, discord.TextChannel):
-                    staff_msg = await staff_channel.fetch_message(int(report["staff_message_id"]))
-
-                    reporter = await interaction.client.fetch_user(int(report["reporter_id"]))
-                    source = interaction.guild.get_channel(int(report["source_channel_id"])) or staff_channel
-
-                    ticket_id = None
-                    try:
-                        ticket_id = self.db.get_ticket_channel_id(report_id)
-                    except Exception:
-                        ticket_id = None
-
-                    # Pull claim info if your DB/report dict has it (defensive)
-                    claimed_by = report.get("claimed_by_user_id")
-                    claimed_at = report.get("claimed_at")
-
-                    embed = build_staff_embed(
-                        report_id,
-                        report["report_type"],
-                        reporter,
-                        source,
-                        report["payload"],
-                        "Resolved",
-                        ticket_channel_id=None,
-                        claimed_by_user_id=claimed_by,
-                        claimed_at=claimed_at,
-                        resolved_by_id=resolver_id,
-                    )
-
-                    view = ReportActionView(
-                        db=self.db,
-                        staff_channel_id=self.staff_channel_id,
-                        support_channel_id=self.support_channel_id,
-                        public_updates=self.public_updates,
-                        staff_role_id=self.staff_role_id,
-                    )
-                    view.disable_all()
-
-                    await staff_msg.edit(embed=embed, view=view)
-            except Exception:
-                pass
-
-        # DM reporter
-        try:
-            reporter = await interaction.client.fetch_user(int(report["reporter_id"]))
-            subj = report_subject(report["report_type"], report["payload"])
-            await try_dm(reporter, f"✅ Update on your report #{report_id} ({subj}): **Resolved**.")
-        except Exception:
-            pass
-
-        try:
-            self.db.set_ticket_channel_id(report_id, None)
-        except Exception:
-            pass
-
-        await interaction.response.send_message("✅ Resolved. Closing ticket…", ephemeral=True)
-
-        try:
-            await interaction.channel.delete(reason=f"Resolved ticket for report #{report_id}")
-        except discord.Forbidden:
-            try:
-                await interaction.channel.edit(name=f"closed-report-{report_id}")
-            except Exception:
-                pass
+        modal = ResolveReportModal(
+            db=self.db,
+            staff_channel_id=self.staff_channel_id,
+            support_channel_id=self.support_channel_id,
+            public_updates=self.public_updates,
+            staff_role_id=self.staff_role_id,
+            report_id=report_id,
+            delete_current_channel=True,     # this IS the ticket channel
+            close_ticket_channel=False,      # modal will clear DB + delete current channel
+        )
+        await interaction.response.send_modal(modal)
 
 
 class ReportActionView(discord.ui.View):
@@ -283,39 +222,21 @@ class ReportActionView(discord.ui.View):
             return await interaction.response.send_message("❌ Report not found.", ephemeral=True)
 
         report_id = int(report["id"])
-        resolver_id = int(interaction.user.id)
 
-        await self._close_ticket_channel_if_any(interaction.guild, report_id)
+        # Open modal instead of resolving immediately
+        from bot.modals import ResolveReportModal  # lazy import to avoid circulars
 
-        if hasattr(self.db, "mark_resolved"):
-            self.db.mark_resolved(report_id, resolver_id)  # type: ignore[attr-defined]
-        else:
-            self.db.update_status(report_id, "Resolved")
-
-        reporter = await interaction.client.fetch_user(int(report["reporter_id"]))
-        source = interaction.guild.get_channel(int(report["source_channel_id"])) or interaction.channel
-        subject = report_subject(report["report_type"], report["payload"])
-
-        claimed_by = report.get("claimed_by_user_id")
-        claimed_at = report.get("claimed_at")
-
-        embed = build_staff_embed(
-            report_id,
-            report["report_type"],
-            reporter,
-            source,
-            report["payload"],
-            "Resolved",
-            ticket_channel_id=None,
-            claimed_by_user_id=claimed_by,
-            claimed_at=claimed_at,
-            resolved_by_id=resolver_id,
+        modal = ResolveReportModal(
+            db=self.db,
+            staff_channel_id=self.staff_channel_id,
+            support_channel_id=self.support_channel_id,
+            public_updates=self.public_updates,
+            staff_role_id=self.staff_role_id,
+            report_id=report_id,
+            delete_current_channel=False,  # staff channel message, don't delete this channel
+            close_ticket_channel=True,     # close any ticket for this report first
         )
-
-        self.disable_all()
-        await interaction.response.edit_message(embed=embed, view=self)
-
-        await try_dm(reporter, f"✅ Update on your report #{report_id} ({subject}): **Resolved**.")
+        await interaction.response.send_modal(modal)
 
     @discord.ui.button(label="Open ticket", style=discord.ButtonStyle.primary, custom_id="report:ticket")
     async def open_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -395,7 +316,6 @@ class ReportActionView(discord.ui.View):
         claimed_by_user_id = int(interaction.user.id)
         claimed_at = _now_iso()
 
-        # Best-effort: if your DB has a claim method/columns, write it; otherwise just show it on the embed.
         if hasattr(self.db, "mark_claimed"):
             try:
                 self.db.mark_claimed(int(report["id"]), claimed_by_user_id, claimed_at)  # type: ignore[attr-defined]

@@ -1,6 +1,6 @@
 import discord
 from bot.db import ReportDB
-from bot.utils import build_staff_embed
+from bot.utils import build_staff_embed, report_subject, try_dm
 from bot.views import ReportActionView
 
 
@@ -138,3 +138,172 @@ class VODReportModal(discord.ui.Modal, title="Report VOD Issue"):
             f"✅ Submitted VOD report **#{report_id}** for **{payload['title']}** ({q}).",
             ephemeral=True,
         )
+
+
+class ResolveReportModal(discord.ui.Modal):
+    """
+    Staff-only modal shown when pressing Resolve (either from staff channel or inside a ticket).
+    Optional notes are:
+      - included in the DM to the reporter
+      - shown on the staff embed
+    """
+
+    details = discord.ui.TextInput(
+        label="Resolution details (optional)",
+        style=discord.TextStyle.paragraph,
+        required=False,
+        max_length=1000,
+        placeholder="Anything you want the reporter to know (optional)",
+    )
+
+    def __init__(
+        self,
+        db: ReportDB,
+        staff_channel_id: int,
+        support_channel_id: int,
+        public_updates: bool,
+        staff_role_id: int,
+        report_id: int,
+        *,
+        delete_current_channel: bool = False,
+        close_ticket_channel: bool = False,
+    ):
+        super().__init__(title=f"Resolve Report #{int(report_id)}")
+        self.db = db
+        self.staff_channel_id = int(staff_channel_id or 0)
+        self.support_channel_id = int(support_channel_id or 0)
+        self.public_updates = bool(public_updates)
+        self.staff_role_id = int(staff_role_id or 0)
+        self.report_id = int(report_id)
+        self.delete_current_channel = bool(delete_current_channel)
+        self.close_ticket_channel = bool(close_ticket_channel)
+
+    async def _close_ticket_channel_if_any(self, guild: discord.Guild):
+        """
+        Best-effort: delete an open ticket channel for this report.
+        If we can't delete it, rename it so it's obviously closed.
+        Always clears the DB ticket_channel_id if it was set.
+        """
+        ticket_id = None
+        try:
+            ticket_id = self.db.get_ticket_channel_id(self.report_id)
+        except Exception:
+            ticket_id = None
+
+        if not ticket_id:
+            return
+
+        ch = guild.get_channel(int(ticket_id))
+        if isinstance(ch, discord.TextChannel):
+            try:
+                await ch.delete(reason=f"Report #{self.report_id} resolved")
+            except discord.Forbidden:
+                try:
+                    await ch.edit(name=f"closed-report-{self.report_id}")
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+        try:
+            self.db.set_ticket_channel_id(self.report_id, None)
+        except Exception:
+            pass
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not interaction.guild:
+            return await interaction.response.send_message("❌ This can only be used in a server.", ephemeral=True)
+
+        report = self.db.get_report_by_id(self.report_id)
+        if not report or int(report.get("guild_id", 0)) != interaction.guild.id:
+            return await interaction.response.send_message("❌ Report not found.", ephemeral=True)
+
+        resolver_id = int(interaction.user.id)
+        note = str(self.details).strip()
+
+        # If resolving from staff channel, close any ticket channel first
+        if self.close_ticket_channel:
+            await self._close_ticket_channel_if_any(interaction.guild)
+
+        # Mark resolved in DB (best-effort for your DB variants)
+        if hasattr(self.db, "mark_resolved"):
+            try:
+                self.db.mark_resolved(self.report_id, resolver_id)  # type: ignore[attr-defined]
+            except Exception:
+                self.db.update_status(self.report_id, "Resolved")
+        else:
+            self.db.update_status(self.report_id, "Resolved")
+
+        # Refresh report (so claimed fields, etc. are current)
+        report = self.db.get_report_by_id(self.report_id) or report
+
+        # Update staff message embed + disable buttons
+        if self.staff_channel_id and report.get("staff_message_id"):
+            try:
+                staff_channel = interaction.guild.get_channel(self.staff_channel_id)
+                if isinstance(staff_channel, discord.TextChannel):
+                    staff_msg = await staff_channel.fetch_message(int(report["staff_message_id"]))
+
+                    reporter = await interaction.client.fetch_user(int(report["reporter_id"]))
+                    source = interaction.guild.get_channel(int(report["source_channel_id"])) or staff_channel
+
+                    claimed_by = report.get("claimed_by_user_id")
+                    claimed_at = report.get("claimed_at")
+
+                    embed = build_staff_embed(
+                        self.report_id,
+                        report["report_type"],
+                        reporter,
+                        source,
+                        report["payload"],
+                        "Resolved",
+                        ticket_channel_id=None,  # don't show dead ticket link
+                        claimed_by_user_id=claimed_by,
+                        claimed_at=claimed_at,
+                        resolved_by_id=resolver_id,
+                        resolved_note=note or None,
+                    )
+
+                    view = ReportActionView(
+                        db=self.db,
+                        staff_channel_id=self.staff_channel_id,
+                        support_channel_id=self.support_channel_id,
+                        public_updates=self.public_updates,
+                        staff_role_id=self.staff_role_id,
+                    )
+                    view.disable_all()
+
+                    await staff_msg.edit(embed=embed, view=view)
+            except Exception:
+                pass
+
+        # DM reporter with optional note
+        try:
+            reporter = await interaction.client.fetch_user(int(report["reporter_id"]))
+            subj = report_subject(report["report_type"], report["payload"])
+            msg = f"✅ Update on your report #{self.report_id} ({subj}): **Resolved**."
+            if note:
+                msg += f"\n\nDetails: {note}"
+            await try_dm(reporter, msg)
+        except Exception:
+            pass
+
+        # Always clear ticket reference (even if we didn't/couldn't delete channel)
+        try:
+            self.db.set_ticket_channel_id(self.report_id, None)
+        except Exception:
+            pass
+
+        await interaction.response.send_message("✅ Resolved.", ephemeral=True)
+
+        # If this was invoked inside the ticket, delete/rename the ticket channel
+        if self.delete_current_channel and interaction.channel:
+            try:
+                await interaction.channel.delete(reason=f"Resolved ticket for report #{self.report_id}")
+            except discord.Forbidden:
+                try:
+                    await interaction.channel.edit(name=f"closed-report-{self.report_id}")
+                except Exception:
+                    pass
+            except Exception:
+                pass
