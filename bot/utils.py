@@ -105,7 +105,7 @@ def build_staff_embed(
     status_txt = str(status or "Open")
     embed.add_field(name="Status", value=status_txt, inline=False)
 
-    # Claim info (optional)
+    # Claim info
     if claimed_by_user_id:
         claim_line = f"<@{int(claimed_by_user_id)}>"
         ts = _iso_to_discord_ts(claimed_at)
@@ -113,11 +113,11 @@ def build_staff_embed(
             claim_line += f" • {ts}"
         embed.add_field(name="Claimed by", value=claim_line, inline=False)
 
-    # Resolver info (optional)
+    # Resolver info
     if status_txt.strip().lower() == "resolved" and resolved_by_id:
         embed.add_field(name="Resolved by", value=f"<@{int(resolved_by_id)}>", inline=False)
 
-    # Resolution details (optional)
+    # Resolution details
     if status_txt.strip().lower() == "resolved" and resolved_note:
         embed.add_field(name="Resolution details", value=str(resolved_note)[:1024], inline=False)
 
@@ -147,16 +147,19 @@ def build_staff_embed(
 
         embed.add_field(name="Issue", value=str(issue), inline=False)
 
-    # Ticket field (only if we know it AND it makes sense to show)
-    if ticket_channel_id and status_txt.strip().lower() != "resolved":
+    # Ticket link
+    if ticket_channel_id and status_txt.strip().lower() not in ("resolved", "not resolved"):
         embed.add_field(name="Ticket", value=f"<#{int(ticket_channel_id)}>", inline=False)
 
+    # Updated staff actions text
     embed.add_field(
         name="Staff actions",
         value=(
-            "✅ **Resolved** — closes the report\n"
-            "🎫 **Open ticket** — creates a private ticket channel for staff + the reporter\n\n"
-            "When the ticket is finished, use **Resolve** in the ticket to close it and mark the report as **Resolved**."
+            "✅ **Resolved** — mark the report as resolved and notify the reporter\n"
+            "❌ **Not Resolved** — close the report with required details explaining why "
+            "(e.g., issue cannot be replicated)\n"
+            "🎫 **Open ticket** — create a private ticket channel for staff + the reporter\n\n"
+            "When working inside a ticket, use **Resolve** or **Not Resolved** there to finish and close it."
         ),
         inline=False,
     )

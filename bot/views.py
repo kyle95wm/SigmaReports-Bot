@@ -8,7 +8,7 @@ from bot.db import ReportDB
 from bot.utils import build_staff_embed, report_subject, try_dm
 
 
-CLOSED_STATUSES = {"Resolved", "Can't replicate", "Fixed"}
+CLOSED_STATUSES = {"Resolved", "Can't replicate", "Fixed", "Not Resolved"}
 TICKETS_CATEGORY_ID = 1458642805437239397
 
 
@@ -44,7 +44,7 @@ def _build_ticket_embed(report: dict, reporter: discord.abc.User, guild: discord
             f"**Subject:** {subject}\n"
             f"**Type:** {rtype}\n"
             f"**Reported from:** {src_text}\n\n"
-            f"Use the **Resolve** button below when this is finished."
+            f"Use **Resolve** or **Not Resolved** below when this is finished."
         ),
     )
 
@@ -123,7 +123,6 @@ class TicketResolveView(discord.ui.View):
         if not report:
             return await interaction.response.send_message("❌ Report not found.", ephemeral=True)
 
-        # Open modal instead of resolving immediately
         from bot.modals import ResolveReportModal  # lazy import to avoid circulars
 
         modal = ResolveReportModal(
@@ -133,8 +132,38 @@ class TicketResolveView(discord.ui.View):
             public_updates=self.public_updates,
             staff_role_id=self.staff_role_id,
             report_id=report_id,
-            delete_current_channel=True,     # this IS the ticket channel
-            close_ticket_channel=False,      # modal will clear DB + delete current channel
+            delete_current_channel=True,   # this IS the ticket channel
+            close_ticket_channel=False,    # modal will clear DB + delete current channel
+        )
+        await interaction.response.send_modal(modal)
+
+    @discord.ui.button(label="Not Resolved", style=discord.ButtonStyle.danger, custom_id="ticket:not_resolved")
+    async def not_resolved(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not interaction.guild or not interaction.channel:
+            return await interaction.response.send_message("❌ This can only be used in a server.", ephemeral=True)
+
+        if not self._is_staff(interaction):
+            return await interaction.response.send_message("❌ Staff only.", ephemeral=True)
+
+        report_id = self._extract_report_id(interaction.channel)
+        if not report_id:
+            return await interaction.response.send_message("❌ Couldn’t determine report ID for this ticket.", ephemeral=True)
+
+        report = self.db.get_report_by_id(report_id)
+        if not report:
+            return await interaction.response.send_message("❌ Report not found.", ephemeral=True)
+
+        from bot.modals import NotResolvedReportModal  # lazy import to avoid circulars
+
+        modal = NotResolvedReportModal(
+            db=self.db,
+            staff_channel_id=self.staff_channel_id,
+            support_channel_id=self.support_channel_id,
+            public_updates=self.public_updates,
+            staff_role_id=self.staff_role_id,
+            report_id=report_id,
+            delete_current_channel=True,   # this IS the ticket channel
+            close_ticket_channel=False,    # modal will clear DB + delete current channel
         )
         await interaction.response.send_modal(modal)
 
@@ -195,7 +224,7 @@ class ReportActionView(discord.ui.View):
         ch = guild.get_channel(int(ticket_id))
         if isinstance(ch, discord.TextChannel):
             try:
-                await ch.delete(reason=f"Report #{report_id} resolved from staff channel")
+                await ch.delete(reason=f"Report #{report_id} closed from staff channel")
             except discord.Forbidden:
                 try:
                     await ch.edit(name=f"closed-report-{report_id}")
@@ -223,10 +252,37 @@ class ReportActionView(discord.ui.View):
 
         report_id = int(report["id"])
 
-        # Open modal instead of resolving immediately
         from bot.modals import ResolveReportModal  # lazy import to avoid circulars
 
         modal = ResolveReportModal(
+            db=self.db,
+            staff_channel_id=self.staff_channel_id,
+            support_channel_id=self.support_channel_id,
+            public_updates=self.public_updates,
+            staff_role_id=self.staff_role_id,
+            report_id=report_id,
+            delete_current_channel=False,  # staff channel message, don't delete this channel
+            close_ticket_channel=True,     # close any ticket for this report first
+        )
+        await interaction.response.send_modal(modal)
+
+    @discord.ui.button(label="Not Resolved", style=discord.ButtonStyle.danger, custom_id="report:not_resolved")
+    async def not_resolved(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await self._ensure_staff_channel(interaction):
+            return
+
+        if not interaction.message:
+            return await interaction.response.send_message("❌ Couldn’t read the report message.", ephemeral=True)
+
+        report = self.db.get_by_staff_message_id(interaction.message.id)
+        if not report:
+            return await interaction.response.send_message("❌ Report not found.", ephemeral=True)
+
+        report_id = int(report["id"])
+
+        from bot.modals import NotResolvedReportModal  # lazy import to avoid circulars
+
+        modal = NotResolvedReportModal(
             db=self.db,
             staff_channel_id=self.staff_channel_id,
             support_channel_id=self.support_channel_id,

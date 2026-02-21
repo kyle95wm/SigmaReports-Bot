@@ -196,11 +196,6 @@ class TVReportModal(discord.ui.Modal, title="Report TV Issue"):
 # ----------------------------
 
 class VODTVShowReportModal(discord.ui.Modal, title="Report TV Show Issue"):
-    """
-    TV show VOD report:
-      - requires TVDB /series/ link
-    """
-
     title_name = discord.ui.TextInput(
         label="Show + season/episode (e.g. S02E03)",  # <= 45 chars
         max_length=150,
@@ -287,11 +282,6 @@ class VODTVShowReportModal(discord.ui.Modal, title="Report TV Show Issue"):
 
 
 class VODMovieReportModal(discord.ui.Modal, title="Report Movie Issue"):
-    """
-    Movie VOD report:
-      - requires TMDB /movie/ link
-    """
-
     title_name = discord.ui.TextInput(
         label="Movie name",
         max_length=150,
@@ -376,10 +366,6 @@ class VODMovieReportModal(discord.ui.Modal, title="Report Movie Issue"):
             ephemeral=True,
         )
 
-
-# ----------------------------
-# Picker View (Option B)
-# ----------------------------
 
 class VODTypePickerView(discord.ui.View):
     def __init__(self, db: ReportDB, cfg):
@@ -547,6 +533,165 @@ class ResolveReportModal(discord.ui.Modal):
         if self.delete_current_channel and interaction.channel:
             try:
                 await interaction.channel.delete(reason=f"Resolved ticket for report #{self.report_id}")
+            except discord.Forbidden:
+                try:
+                    await interaction.channel.edit(name=f"closed-report-{self.report_id}")
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+
+# ----------------------------
+# Not Resolved modal (NEW)
+# ----------------------------
+
+class NotResolvedReportModal(discord.ui.Modal):
+    details = discord.ui.TextInput(
+        label="Why isn’t this resolved?",
+        style=discord.TextStyle.paragraph,
+        required=True,  # ✅ required
+        max_length=1000,
+        placeholder="Explain what was tried and what’s still failing (required)",
+    )
+
+    def __init__(
+        self,
+        db: ReportDB,
+        staff_channel_id: int,
+        support_channel_id: int,
+        public_updates: bool,
+        staff_role_id: int,
+        report_id: int,
+        *,
+        delete_current_channel: bool = False,
+        close_ticket_channel: bool = False,
+    ):
+        # Keep title short (Discord enforces limits here too)
+        super().__init__(title=f"Not Resolved #{int(report_id)}")
+        self.db = db
+        self.staff_channel_id = int(staff_channel_id or 0)
+        self.support_channel_id = int(support_channel_id or 0)
+        self.public_updates = bool(public_updates)
+        self.staff_role_id = int(staff_role_id or 0)
+        self.report_id = int(report_id)
+        self.delete_current_channel = bool(delete_current_channel)
+        self.close_ticket_channel = bool(close_ticket_channel)
+
+    async def _close_ticket_channel_if_any(self, guild: discord.Guild):
+        ticket_id = None
+        try:
+            ticket_id = self.db.get_ticket_channel_id(self.report_id)
+        except Exception:
+            ticket_id = None
+
+        if not ticket_id:
+            return
+
+        ch = guild.get_channel(int(ticket_id))
+        if isinstance(ch, discord.TextChannel):
+            try:
+                await ch.delete(reason=f"Report #{self.report_id} closed as not resolved")
+            except discord.Forbidden:
+                try:
+                    await ch.edit(name=f"closed-report-{self.report_id}")
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+        try:
+            self.db.set_ticket_channel_id(self.report_id, None)
+        except Exception:
+            pass
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not interaction.guild:
+            return await interaction.response.send_message("❌ This can only be used in a server.", ephemeral=True)
+
+        report = self.db.get_report_by_id(self.report_id)
+        if not report or int(report.get("guild_id", 0)) != interaction.guild.id:
+            return await interaction.response.send_message("❌ Report not found.", ephemeral=True)
+
+        resolver_id = int(interaction.user.id)
+        note = str(self.details).strip()
+        if not note:
+            # Shouldn't happen because required=True, but keep it safe.
+            return await interaction.response.send_message("❌ Details are required.", ephemeral=True)
+
+        if self.close_ticket_channel:
+            await self._close_ticket_channel_if_any(interaction.guild)
+
+        # No mark_resolved call here — this is a different outcome
+        self.db.update_status(self.report_id, "Not Resolved")
+
+        report = self.db.get_report_by_id(self.report_id) or report
+
+        # Update staff embed + disable buttons
+        if self.staff_channel_id and report.get("staff_message_id"):
+            try:
+                staff_channel = interaction.guild.get_channel(self.staff_channel_id)
+                if isinstance(staff_channel, discord.TextChannel):
+                    staff_msg = await staff_channel.fetch_message(int(report["staff_message_id"]))
+
+                    reporter_u = await interaction.client.fetch_user(int(report["reporter_id"]))
+                    source = interaction.guild.get_channel(int(report["source_channel_id"])) or staff_channel
+
+                    claimed_by = report.get("claimed_by_user_id")
+                    claimed_at = report.get("claimed_at")
+
+                    embed = build_staff_embed(
+                        self.report_id,
+                        report["report_type"],
+                        reporter_u,
+                        source,
+                        report["payload"],
+                        "Not Resolved",
+                        ticket_channel_id=None,
+                        claimed_by_user_id=claimed_by,
+                        claimed_at=claimed_at,
+                        resolved_by_id=resolver_id,
+                        resolved_note=note,  # reuse existing field in embed builder
+                    )
+
+                    view = ReportActionView(
+                        db=self.db,
+                        staff_channel_id=self.staff_channel_id,
+                        support_channel_id=self.support_channel_id,
+                        public_updates=self.public_updates,
+                        staff_role_id=self.staff_role_id,
+                    )
+                    view.disable_all()
+
+                    await staff_msg.edit(embed=embed, view=view)
+            except Exception:
+                pass
+
+        # DM + public update
+        reporter = None
+        msg = None
+        try:
+            reporter = await interaction.client.fetch_user(int(report["reporter_id"]))
+            subj = report_subject(report["report_type"], report["payload"])
+            msg = f"⚠️ Update on your report #{self.report_id} ({subj}): **Not resolved**.\n\nDetails: {note}"
+            await try_dm(reporter, msg)
+        except Exception:
+            pass
+
+        if self.public_updates and reporter and msg:
+            responses_cid = _get_responses_channel_id_from_bot(interaction)
+            await _try_public_update(interaction, responses_cid, reporter, msg)
+
+        try:
+            self.db.set_ticket_channel_id(self.report_id, None)
+        except Exception:
+            pass
+
+        await interaction.response.send_message("✅ Closed as not resolved.", ephemeral=True)
+
+        if self.delete_current_channel and interaction.channel:
+            try:
+                await interaction.channel.delete(reason=f"Closed (not resolved) ticket for report #{self.report_id}")
             except discord.Forbidden:
                 try:
                     await interaction.channel.edit(name=f"closed-report-{self.report_id}")
