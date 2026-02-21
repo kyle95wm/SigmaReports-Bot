@@ -1,4 +1,6 @@
 import discord
+from urllib.parse import urlparse
+
 from bot.db import ReportDB
 from bot.utils import build_staff_embed, report_subject, try_dm
 from bot.views import ReportActionView
@@ -8,6 +10,39 @@ def build_staff_ping(ping_ids: list[int]) -> str:
     if not ping_ids:
         return ""
     return " ".join(f"<@{uid}>" for uid in ping_ids)
+
+
+def _is_allowed_reference_link(url: str) -> bool:
+    """
+    Allow ONLY:
+      - thetvdb.com / www.thetvdb.com
+      - themoviedb.org / www.themoviedb.org
+    Must be http(s) and have a path.
+    """
+    u = (url or "").strip()
+    if not u:
+        return False
+
+    try:
+        p = urlparse(u)
+    except Exception:
+        return False
+
+    if p.scheme not in ("http", "https"):
+        return False
+
+    host = (p.netloc or "").lower()
+    if host.startswith("www."):
+        host = host[4:]
+
+    if host not in ("thetvdb.com", "themoviedb.org"):
+        return False
+
+    # Require some path content (prevents just the homepage)
+    if not (p.path or "").strip("/") :
+        return False
+
+    return True
 
 
 class TVReportModal(discord.ui.Modal, title="Report TV Issue"):
@@ -73,9 +108,9 @@ class VODReportModal(discord.ui.Modal, title="Report VOD Issue"):
     title_name = discord.ui.TextInput(label="Title (movie or show + S/E)", max_length=150)
 
     reference_link = discord.ui.TextInput(
-        label="Reference link (TheTVDB / TMDB / IMDb)",
+        label="Reference link (TheTVDB / TheMovieDB only)",
         max_length=300,
-        placeholder="Paste a link that matches the exact title",
+        placeholder="Paste a TheTVDB or TheMovieDB link that matches the exact title",
     )
 
     quality = discord.ui.TextInput(label="Quality (FHD or 4K)", max_length=10)
@@ -91,9 +126,22 @@ class VODReportModal(discord.ui.Modal, title="Report VOD Issue"):
         if q not in ("FHD", "4K"):
             q = "Unknown"
 
+        ref = str(self.reference_link).strip()
+        if not _is_allowed_reference_link(ref):
+            return await interaction.response.send_message(
+                "❌ That reference link isn’t valid.\n\n"
+                "Please re-submit using a link from **TheTVDB** or **TheMovieDB** only.\n"
+                "Examples:\n"
+                "• <https://www.thetvdb.com/series/smallville>\n"
+                "• <https://www.thetvdb.com/movies/time-trap>\n"
+                "• <https://www.themoviedb.org/movie/14161-2012>\n"
+                "• <https://www.themoviedb.org/tv/1434-family-guy>",
+                ephemeral=True,
+            )
+
         payload = {
             "title": str(self.title_name),
-            "reference_link": str(self.reference_link),
+            "reference_link": ref,
             "quality": q,
             "issue": str(self.issue),
         }
@@ -179,11 +227,6 @@ class ResolveReportModal(discord.ui.Modal):
         self.close_ticket_channel = bool(close_ticket_channel)
 
     async def _close_ticket_channel_if_any(self, guild: discord.Guild):
-        """
-        Best-effort: delete an open ticket channel for this report.
-        If we can't delete it, rename it so it's obviously closed.
-        Always clears the DB ticket_channel_id if it was set.
-        """
         ticket_id = None
         try:
             ticket_id = self.db.get_ticket_channel_id(self.report_id)
@@ -221,11 +264,9 @@ class ResolveReportModal(discord.ui.Modal):
         resolver_id = int(interaction.user.id)
         note = str(self.details).strip()
 
-        # If resolving from staff channel, close any ticket channel first
         if self.close_ticket_channel:
             await self._close_ticket_channel_if_any(interaction.guild)
 
-        # Mark resolved in DB (best-effort for your DB variants)
         if hasattr(self.db, "mark_resolved"):
             try:
                 self.db.mark_resolved(self.report_id, resolver_id)  # type: ignore[attr-defined]
@@ -234,10 +275,8 @@ class ResolveReportModal(discord.ui.Modal):
         else:
             self.db.update_status(self.report_id, "Resolved")
 
-        # Refresh report (so claimed fields, etc. are current)
         report = self.db.get_report_by_id(self.report_id) or report
 
-        # Update staff message embed + disable buttons
         if self.staff_channel_id and report.get("staff_message_id"):
             try:
                 staff_channel = interaction.guild.get_channel(self.staff_channel_id)
@@ -257,7 +296,7 @@ class ResolveReportModal(discord.ui.Modal):
                         source,
                         report["payload"],
                         "Resolved",
-                        ticket_channel_id=None,  # don't show dead ticket link
+                        ticket_channel_id=None,
                         claimed_by_user_id=claimed_by,
                         claimed_at=claimed_at,
                         resolved_by_id=resolver_id,
@@ -277,7 +316,6 @@ class ResolveReportModal(discord.ui.Modal):
             except Exception:
                 pass
 
-        # DM reporter with optional note
         try:
             reporter = await interaction.client.fetch_user(int(report["reporter_id"]))
             subj = report_subject(report["report_type"], report["payload"])
@@ -288,7 +326,6 @@ class ResolveReportModal(discord.ui.Modal):
         except Exception:
             pass
 
-        # Always clear ticket reference (even if we didn't/couldn't delete channel)
         try:
             self.db.set_ticket_channel_id(self.report_id, None)
         except Exception:
@@ -296,7 +333,6 @@ class ResolveReportModal(discord.ui.Modal):
 
         await interaction.response.send_message("✅ Resolved.", ephemeral=True)
 
-        # If this was invoked inside the ticket, delete/rename the ticket channel
         if self.delete_current_channel and interaction.channel:
             try:
                 await interaction.channel.delete(reason=f"Resolved ticket for report #{self.report_id}")
