@@ -12,37 +12,49 @@ def build_staff_ping(ping_ids: list[int]) -> str:
     return " ".join(f"<@{uid}>" for uid in ping_ids)
 
 
-def _is_allowed_reference_link(url: str) -> bool:
+def _validate_reference_link_for_kind(kind: str, url: str) -> tuple[bool, str]:
     """
-    Allow ONLY:
-      - thetvdb.com / www.thetvdb.com
-      - themoviedb.org / www.themoviedb.org
-    Must be http(s) and have a path.
+    kind:
+      - "tv"    -> must be thetvdb.com and path starts with /series/
+      - "movie" -> must be themoviedb.org and path starts with /movie/
+
+    Returns: (ok, error_message)
     """
     u = (url or "").strip()
     if not u:
-        return False
+        return False, "Reference link is required."
 
     try:
         p = urlparse(u)
     except Exception:
-        return False
+        return False, "That doesn’t look like a valid URL."
 
     if p.scheme not in ("http", "https"):
-        return False
+        return False, "Link must start with http:// or https://"
 
     host = (p.netloc or "").lower()
     if host.startswith("www."):
         host = host[4:]
 
-    if host not in ("thetvdb.com", "themoviedb.org"):
-        return False
+    path = (p.path or "").strip()
+    if not path or path == "/":
+        return False, "Please link to a specific title (not the homepage)."
 
-    # Require some path content (prevents just the homepage)
-    if not (p.path or "").strip("/") :
-        return False
+    if kind == "tv":
+        if host != "thetvdb.com":
+            return False, "TV shows must use a TheTVDB link."
+        if not path.startswith("/series/") or path.strip("/") == "series":
+            return False, "TheTVDB TV links must look like: <https://www.thetvdb.com/series/smallville>"
+        return True, ""
 
-    return True
+    if kind == "movie":
+        if host != "themoviedb.org":
+            return False, "Movies must use a TheMovieDB link."
+        if not path.startswith("/movie/") or path.strip("/") == "movie":
+            return False, "TMDB movie links must look like: <https://www.themoviedb.org/movie/14161-2012>"
+        return True, ""
+
+    return False, "Invalid report type."
 
 
 class TVReportModal(discord.ui.Modal, title="Report TV Issue"):
@@ -104,22 +116,26 @@ class TVReportModal(discord.ui.Modal, title="Report TV Issue"):
         )
 
 
-class VODReportModal(discord.ui.Modal, title="Report VOD Issue"):
+class VODReportModal(discord.ui.Modal, title="Report Movie / TV Show Issue"):
+    """
+    This modal is launched AFTER the user chooses Movie vs TV Show in a view step.
+    """
     title_name = discord.ui.TextInput(label="Title (movie or show + S/E)", max_length=150)
 
     reference_link = discord.ui.TextInput(
-        label="Reference link (TheTVDB / TheMovieDB only)",
+        label="Reference link (Movie=TMDB, TV=TheTVDB)",
         max_length=300,
-        placeholder="Paste a TheTVDB or TheMovieDB link that matches the exact title",
+        placeholder="Paste the TheTVDB/TMDB link that matches the exact title",
     )
 
     quality = discord.ui.TextInput(label="Quality (FHD or 4K)", max_length=10)
     issue = discord.ui.TextInput(label="What’s the issue?", style=discord.TextStyle.paragraph)
 
-    def __init__(self, db: ReportDB, cfg):
+    def __init__(self, db: ReportDB, cfg, *, kind: str):
         super().__init__()
         self.db = db
         self.cfg = cfg
+        self.kind = kind  # "movie" or "tv"
 
     async def on_submit(self, interaction: discord.Interaction):
         q = str(self.quality).upper()
@@ -127,20 +143,27 @@ class VODReportModal(discord.ui.Modal, title="Report VOD Issue"):
             q = "Unknown"
 
         ref = str(self.reference_link).strip()
-        if not _is_allowed_reference_link(ref):
+        ok, err = _validate_reference_link_for_kind(self.kind, ref)
+        if not ok:
+            if self.kind == "tv":
+                examples = (
+                    "Examples (TVDB TV shows):\n"
+                    "• <https://www.thetvdb.com/series/smallville>\n"
+                )
+            else:
+                examples = (
+                    "Examples (TMDB movies):\n"
+                    "• <https://www.themoviedb.org/movie/14161-2012>\n"
+                )
+
             return await interaction.response.send_message(
-                "❌ That reference link isn’t valid.\n\n"
-                "Please re-submit using a link from **TheTVDB** or **TheMovieDB** only.\n"
-                "Examples:\n"
-                "• <https://www.thetvdb.com/series/smallville>\n"
-                "• <https://www.thetvdb.com/movies/time-trap>\n"
-                "• <https://www.themoviedb.org/movie/14161-2012>\n"
-                "• <https://www.themoviedb.org/tv/1434-family-guy>",
+                f"❌ {err}\n\nPlease re-submit with the correct type + link.\n{examples}",
                 ephemeral=True,
             )
 
         payload = {
             "title": str(self.title_name),
+            "content_kind": self.kind,  # "movie" or "tv"
             "reference_link": ref,
             "quality": q,
             "issue": str(self.issue),
@@ -182,10 +205,33 @@ class VODReportModal(discord.ui.Modal, title="Report VOD Issue"):
         msg = await staff_channel.send(content=ping_text, embed=embed, view=view)
         self.db.set_staff_message_id(report_id, msg.id)
 
+        kind_label = "Movie" if self.kind == "movie" else "TV Show"
         await interaction.response.send_message(
-            f"✅ Submitted VOD report **#{report_id}** for **{payload['title']}** ({q}).",
+            f"✅ Submitted {kind_label} report **#{report_id}** for **{payload['title']}** ({q}).",
             ephemeral=True,
         )
+
+
+class VODTypePickerView(discord.ui.View):
+    """
+    Ephemeral view shown BEFORE opening the VOD modal.
+    User picks Movie vs TV Show, then we open the modal.
+    """
+    def __init__(self, db: ReportDB, cfg):
+        super().__init__(timeout=60)
+        self.db = db
+        self.cfg = cfg
+
+    async def _open(self, interaction: discord.Interaction, kind: str):
+        await interaction.response.send_modal(VODReportModal(self.db, self.cfg, kind=kind))
+
+    @discord.ui.button(label="Movie", style=discord.ButtonStyle.primary, emoji="🎬", custom_id="vodpick:movie")
+    async def pick_movie(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._open(interaction, "movie")
+
+    @discord.ui.button(label="TV Show", style=discord.ButtonStyle.secondary, emoji="📺", custom_id="vodpick:tv")
+    async def pick_tv(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._open(interaction, "tv")
 
 
 class ResolveReportModal(discord.ui.Modal):
