@@ -3,7 +3,7 @@ from discord import app_commands
 from discord.ext import commands
 from datetime import datetime, timezone
 
-from bot.modals import TVReportModal, VODReportModal
+from bot.modals import TVReportModal, VODTypePickerView
 from bot.views import ReportActionView
 from bot.utils import build_staff_embed
 
@@ -117,7 +117,12 @@ class Reports(commands.Cog):
         if not await self._block_gate(interaction):
             return
 
-        await interaction.response.send_modal(VODReportModal(self.db, self.cfg))
+        # Fix A: chooser step (TV show vs Movie), then correct modal opens
+        await interaction.response.send_message(
+            "Is this a **TV show** or a **movie**?",
+            view=VODTypePickerView(self.db, self.cfg),
+            ephemeral=True,
+        )
 
     # ----------------------------
     # Owner / Admin

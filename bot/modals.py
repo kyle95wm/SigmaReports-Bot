@@ -12,50 +12,59 @@ def build_staff_ping(ping_ids: list[int]) -> str:
     return " ".join(f"<@{uid}>" for uid in ping_ids)
 
 
-def _validate_reference_link_for_kind(kind: str, url: str) -> tuple[bool, str]:
-    """
-    kind:
-      - "tv"    -> must be thetvdb.com and path starts with /series/
-      - "movie" -> must be themoviedb.org and path starts with /movie/
+# ----------------------------
+# Reference link validation (TVDB for TV shows, TMDB for movies)
+# ----------------------------
 
-    Returns: (ok, error_message)
-    """
+def _parse_host_path(url: str) -> tuple[str, str, str] | None:
     u = (url or "").strip()
     if not u:
-        return False, "Reference link is required."
-
+        return None
     try:
         p = urlparse(u)
     except Exception:
-        return False, "That doesn’t look like a valid URL."
+        return None
 
     if p.scheme not in ("http", "https"):
-        return False, "Link must start with http:// or https://"
+        return None
 
     host = (p.netloc or "").lower()
     if host.startswith("www."):
         host = host[4:]
 
     path = (p.path or "").strip()
-    if not path or path == "/":
-        return False, "Please link to a specific title (not the homepage)."
+    return (u, host, path)
 
-    if kind == "tv":
-        if host != "thetvdb.com":
-            return False, "TV shows must use a TheTVDB link."
-        if not path.startswith("/series/") or path.strip("/") == "series":
-            return False, "TheTVDB TV links must look like: <https://www.thetvdb.com/series/smallville>"
-        return True, ""
 
-    if kind == "movie":
-        if host != "themoviedb.org":
-            return False, "Movies must use a TheMovieDB link."
-        if not path.startswith("/movie/") or path.strip("/") == "movie":
-            return False, "TMDB movie links must look like: <https://www.themoviedb.org/movie/14161-2012>"
-        return True, ""
+def _is_tvdb_series_link(url: str) -> bool:
+    parsed = _parse_host_path(url)
+    if not parsed:
+        return False
+    _, host, path = parsed
 
-    return False, "Invalid report type."
+    if host != "thetvdb.com":
+        return False
 
+    path = path.strip("/")
+    return path.startswith("series/") and len(path.split("/", 1)[-1].strip()) > 0
+
+
+def _is_tmdb_movie_link(url: str) -> bool:
+    parsed = _parse_host_path(url)
+    if not parsed:
+        return False
+    _, host, path = parsed
+
+    if host != "themoviedb.org":
+        return False
+
+    path = path.strip("/")
+    return path.startswith("movie/") and len(path.split("/", 1)[-1].strip()) > 0
+
+
+# ----------------------------
+# TV Modal
+# ----------------------------
 
 class TVReportModal(discord.ui.Modal, title="Report TV Issue"):
     channel_name = discord.ui.TextInput(label="Channel name", max_length=100)
@@ -116,26 +125,35 @@ class TVReportModal(discord.ui.Modal, title="Report TV Issue"):
         )
 
 
-class VODReportModal(discord.ui.Modal, title="Report Movie / TV Show Issue"):
+# ----------------------------
+# VOD Modals (TV Show vs Movie)
+# ----------------------------
+
+class VODTVShowReportModal(discord.ui.Modal, title="Report TV Show Issue"):
     """
-    This modal is launched AFTER the user chooses Movie vs TV Show in a view step.
+    TV show VOD report:
+      - requires TVDB /series/ link
     """
-    title_name = discord.ui.TextInput(label="Title (movie or show + S/E)", max_length=150)
+
+    title_name = discord.ui.TextInput(
+        label="Show + season/episode (e.g. S02E03)",  # <= 45 chars
+        max_length=150,
+        placeholder="Example: Family Guy S02E03",
+    )
 
     reference_link = discord.ui.TextInput(
-        label="Reference link (Movie=TMDB, TV=TheTVDB)",
+        label="TVDB series link only",
         max_length=300,
-        placeholder="Paste the TheTVDB/TMDB link that matches the exact title",
+        placeholder="Example: https://www.thetvdb.com/series/family-guy",
     )
 
     quality = discord.ui.TextInput(label="Quality (FHD or 4K)", max_length=10)
     issue = discord.ui.TextInput(label="What’s the issue?", style=discord.TextStyle.paragraph)
 
-    def __init__(self, db: ReportDB, cfg, *, kind: str):
+    def __init__(self, db: ReportDB, cfg):
         super().__init__()
         self.db = db
         self.cfg = cfg
-        self.kind = kind  # "movie" or "tv"
 
     async def on_submit(self, interaction: discord.Interaction):
         q = str(self.quality).upper()
@@ -143,27 +161,17 @@ class VODReportModal(discord.ui.Modal, title="Report Movie / TV Show Issue"):
             q = "Unknown"
 
         ref = str(self.reference_link).strip()
-        ok, err = _validate_reference_link_for_kind(self.kind, ref)
-        if not ok:
-            if self.kind == "tv":
-                examples = (
-                    "Examples (TVDB TV shows):\n"
-                    "• <https://www.thetvdb.com/series/smallville>\n"
-                )
-            else:
-                examples = (
-                    "Examples (TMDB movies):\n"
-                    "• <https://www.themoviedb.org/movie/14161-2012>\n"
-                )
-
+        if not _is_tvdb_series_link(ref):
             return await interaction.response.send_message(
-                f"❌ {err}\n\nPlease re-submit with the correct type + link.\n{examples}",
+                "❌ That reference link isn’t valid for a **TV show**.\n\n"
+                "Please re-submit using a **TheTVDB series** link like:\n"
+                "• <https://www.thetvdb.com/series/smallville>",
                 ephemeral=True,
             )
 
         payload = {
+            "content_type": "tv",
             "title": str(self.title_name),
-            "content_kind": self.kind,  # "movie" or "tv"
             "reference_link": ref,
             "quality": q,
             "issue": str(self.issue),
@@ -205,43 +213,126 @@ class VODReportModal(discord.ui.Modal, title="Report Movie / TV Show Issue"):
         msg = await staff_channel.send(content=ping_text, embed=embed, view=view)
         self.db.set_staff_message_id(report_id, msg.id)
 
-        kind_label = "Movie" if self.kind == "movie" else "TV Show"
         await interaction.response.send_message(
-            f"✅ Submitted {kind_label} report **#{report_id}** for **{payload['title']}** ({q}).",
+            f"✅ Submitted TV show report **#{report_id}** for **{payload['title']}** ({q}).",
             ephemeral=True,
         )
 
 
+class VODMovieReportModal(discord.ui.Modal, title="Report Movie Issue"):
+    """
+    Movie VOD report:
+      - requires TMDB /movie/ link
+    """
+
+    title_name = discord.ui.TextInput(
+        label="Movie name",
+        max_length=150,
+        placeholder="Example: 2012",
+    )
+
+    reference_link = discord.ui.TextInput(
+        label="TMDB movie link only",
+        max_length=300,
+        placeholder="Example: https://www.themoviedb.org/movie/14161-2012",
+    )
+
+    quality = discord.ui.TextInput(label="Quality (FHD or 4K)", max_length=10)
+    issue = discord.ui.TextInput(label="What’s the issue?", style=discord.TextStyle.paragraph)
+
+    def __init__(self, db: ReportDB, cfg):
+        super().__init__()
+        self.db = db
+        self.cfg = cfg
+
+    async def on_submit(self, interaction: discord.Interaction):
+        q = str(self.quality).upper()
+        if q not in ("FHD", "4K"):
+            q = "Unknown"
+
+        ref = str(self.reference_link).strip()
+        if not _is_tmdb_movie_link(ref):
+            return await interaction.response.send_message(
+                "❌ That reference link isn’t valid for a **movie**.\n\n"
+                "Please re-submit using a **TMDB movie** link like:\n"
+                "• <https://www.themoviedb.org/movie/14161-2012>",
+                ephemeral=True,
+            )
+
+        payload = {
+            "content_type": "movie",
+            "title": str(self.title_name),
+            "reference_link": ref,
+            "quality": q,
+            "issue": str(self.issue),
+        }
+
+        report_id = self.db.create_report(
+            "vod",
+            interaction.user.id,
+            interaction.guild.id,
+            interaction.channel.id,
+            payload,
+        )
+
+        staff_channel = interaction.guild.get_channel(self.cfg.staff_channel_id)
+        if not isinstance(staff_channel, discord.TextChannel):
+            return await interaction.response.send_message("❌ Staff channel not found.", ephemeral=True)
+
+        embed = build_staff_embed(
+            report_id,
+            "vod",
+            interaction.user,
+            interaction.channel,
+            payload,
+            "Open",
+        )
+
+        view = ReportActionView(
+            self.db,
+            self.cfg.staff_channel_id,
+            self.cfg.support_channel_id,
+            self.cfg.public_updates,
+            self.cfg.staff_role_id,
+        )
+
+        ping_text = ""
+        if self.db.get_report_pings_enabled():
+            ping_text = build_staff_ping(self.cfg.staff_ping_user_ids)
+
+        msg = await staff_channel.send(content=ping_text, embed=embed, view=view)
+        self.db.set_staff_message_id(report_id, msg.id)
+
+        await interaction.response.send_message(
+            f"✅ Submitted movie report **#{report_id}** for **{payload['title']}** ({q}).",
+            ephemeral=True,
+        )
+
+
+# ----------------------------
+# Picker View (Option B)
+# ----------------------------
+
 class VODTypePickerView(discord.ui.View):
-    """
-    Ephemeral view shown BEFORE opening the VOD modal.
-    User picks Movie vs TV Show, then we open the modal.
-    """
     def __init__(self, db: ReportDB, cfg):
         super().__init__(timeout=60)
         self.db = db
         self.cfg = cfg
 
-    async def _open(self, interaction: discord.Interaction, kind: str):
-        await interaction.response.send_modal(VODReportModal(self.db, self.cfg, kind=kind))
+    @discord.ui.button(label="TV Show", style=discord.ButtonStyle.primary, emoji="📺", custom_id="vodpicker:tvshow")
+    async def pick_tvshow(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(VODTVShowReportModal(self.db, self.cfg))
 
-    @discord.ui.button(label="Movie", style=discord.ButtonStyle.primary, emoji="🎬", custom_id="vodpick:movie")
+    @discord.ui.button(label="Movie", style=discord.ButtonStyle.secondary, emoji="🎬", custom_id="vodpicker:movie")
     async def pick_movie(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self._open(interaction, "movie")
+        await interaction.response.send_modal(VODMovieReportModal(self.db, self.cfg))
 
-    @discord.ui.button(label="TV Show", style=discord.ButtonStyle.secondary, emoji="📺", custom_id="vodpick:tv")
-    async def pick_tv(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self._open(interaction, "tv")
 
+# ----------------------------
+# Resolve modal (keep yours; included here for completeness)
+# ----------------------------
 
 class ResolveReportModal(discord.ui.Modal):
-    """
-    Staff-only modal shown when pressing Resolve (either from staff channel or inside a ticket).
-    Optional notes are:
-      - included in the DM to the reporter
-      - shown on the staff embed
-    """
-
     details = discord.ui.TextInput(
         label="Resolution details (optional)",
         style=discord.TextStyle.paragraph,
