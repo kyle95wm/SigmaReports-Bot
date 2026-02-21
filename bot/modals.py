@@ -12,6 +12,27 @@ def build_staff_ping(ping_ids: list[int]) -> str:
     return " ".join(f"<@{uid}>" for uid in ping_ids)
 
 
+def _get_ping_ids_for_report(cfg, report_kind: str) -> list[int]:
+    """
+    report_kind:
+      - "tv"  -> tv_staff_ping_user_ids
+      - "vod" -> vod_staff_ping_user_ids
+
+    Falls back to staff_ping_user_ids if split lists aren't present or empty.
+    """
+    fallback = list(getattr(cfg, "staff_ping_user_ids", []) or [])
+
+    if report_kind == "tv":
+        ids = list(getattr(cfg, "tv_staff_ping_user_ids", []) or [])
+        return ids if ids else fallback
+
+    if report_kind == "vod":
+        ids = list(getattr(cfg, "vod_staff_ping_user_ids", []) or [])
+        return ids if ids else fallback
+
+    return fallback
+
+
 # ----------------------------
 # Public updates (responses channel)
 # ----------------------------
@@ -158,7 +179,8 @@ class TVReportModal(discord.ui.Modal, title="Report TV Issue"):
 
         ping_text = ""
         if self.db.get_report_pings_enabled():
-            ping_text = build_staff_ping(self.cfg.staff_ping_user_ids)
+            ping_ids = _get_ping_ids_for_report(self.cfg, "tv")
+            ping_text = build_staff_ping(ping_ids)
 
         msg = await staff_channel.send(content=ping_text, embed=embed, view=view)
         self.db.set_staff_message_id(report_id, msg.id)
@@ -252,7 +274,8 @@ class VODTVShowReportModal(discord.ui.Modal, title="Report TV Show Issue"):
 
         ping_text = ""
         if self.db.get_report_pings_enabled():
-            ping_text = build_staff_ping(self.cfg.staff_ping_user_ids)
+            ping_ids = _get_ping_ids_for_report(self.cfg, "vod")
+            ping_text = build_staff_ping(ping_ids)
 
         msg = await staff_channel.send(content=ping_text, embed=embed, view=view)
         self.db.set_staff_message_id(report_id, msg.id)
@@ -342,7 +365,8 @@ class VODMovieReportModal(discord.ui.Modal, title="Report Movie Issue"):
 
         ping_text = ""
         if self.db.get_report_pings_enabled():
-            ping_text = build_staff_ping(self.cfg.staff_ping_user_ids)
+            ping_ids = _get_ping_ids_for_report(self.cfg, "vod")
+            ping_text = build_staff_ping(ping_ids)
 
         msg = await staff_channel.send(content=ping_text, embed=embed, view=view)
         self.db.set_staff_message_id(report_id, msg.id)
@@ -497,7 +521,6 @@ class ResolveReportModal(discord.ui.Modal):
             except Exception:
                 pass
 
-        # Build the same update message for DM + public post
         reporter = None
         msg = None
         try:
@@ -510,7 +533,6 @@ class ResolveReportModal(discord.ui.Modal):
         except Exception:
             pass
 
-        # Public update (same message) if enabled + responses channel configured
         if self.public_updates and reporter and msg:
             responses_cid = _get_responses_channel_id_from_bot(interaction)
             await _try_public_update(interaction, responses_cid, reporter, msg)

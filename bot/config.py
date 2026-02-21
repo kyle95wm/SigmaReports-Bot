@@ -27,13 +27,20 @@ class Config:
     staff_channel_id: int
     support_channel_id: int
     reports_channel_ids: list[int]
+
+    # ✅ NEW: split pings
+    tv_staff_ping_user_ids: list[int]
+    vod_staff_ping_user_ids: list[int]
+
+    # (kept for backwards compatibility / fallback)
     staff_ping_user_ids: list[int]
+
     public_updates: bool
     db_path: str
     tmdb_bearer_token: str
     staff_role_id: int
     modlogs_channel_id: int
-    responses_channel_id: int  # ✅ NEW
+    responses_channel_id: int
 
 
 def load_config() -> Config:
@@ -55,7 +62,17 @@ def load_config() -> Config:
     if not reports_channel_ids:
         raise RuntimeError("Missing REPORTS_CHANNEL_IDS (or REPORTS_CHANNEL_ID) in .env")
 
+    # old single list (fallback)
     staff_ping_user_ids = _csv_ids(os.getenv("STAFF_PING_USER_IDS", "").strip())
+
+    # ✅ NEW split lists (fallback to old list if not set)
+    tv_staff_ping_user_ids = _csv_ids(os.getenv("TV_STAFF_PING_USER_IDS", "").strip())
+    vod_staff_ping_user_ids = _csv_ids(os.getenv("VOD_STAFF_PING_USER_IDS", "").strip())
+
+    if not tv_staff_ping_user_ids:
+        tv_staff_ping_user_ids = staff_ping_user_ids
+    if not vod_staff_ping_user_ids:
+        vod_staff_ping_user_ids = staff_ping_user_ids
 
     public_updates = _get_bool("PUBLIC_UPDATES", True)
     db_path = os.getenv("DB_PATH", "./data/reports.sqlite3").strip()
@@ -67,7 +84,6 @@ def load_config() -> Config:
 
     modlogs_channel_id = int(os.getenv("MODLOGS_CHANNEL_ID", "0"))
 
-    # ✅ NEW: responses channel for public updates
     responses_channel_id = int(os.getenv("RESPONSES_CHANNEL_ID", "0"))
     if public_updates and responses_channel_id <= 0:
         raise RuntimeError("PUBLIC_UPDATES is enabled but RESPONSES_CHANNEL_ID is missing/invalid in .env")
@@ -77,6 +93,8 @@ def load_config() -> Config:
         staff_channel_id=staff_channel_id,
         support_channel_id=support_channel_id,
         reports_channel_ids=reports_channel_ids,
+        tv_staff_ping_user_ids=tv_staff_ping_user_ids,
+        vod_staff_ping_user_ids=vod_staff_ping_user_ids,
         staff_ping_user_ids=staff_ping_user_ids,
         public_updates=public_updates,
         db_path=db_path,
