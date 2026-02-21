@@ -13,6 +13,50 @@ def build_staff_ping(ping_ids: list[int]) -> str:
 
 
 # ----------------------------
+# Public updates (responses channel)
+# ----------------------------
+
+def _get_responses_channel_id_from_bot(interaction: discord.Interaction) -> int:
+    """
+    Pull RESPONSES_CHANNEL_ID from the bot config if available.
+    Keeps modals.py independent from direct os.getenv reads.
+    """
+    cfg = getattr(interaction.client, "cfg", None)
+    cid = int(getattr(cfg, "responses_channel_id", 0) or 0)
+    return cid
+
+
+async def _try_public_update(
+    interaction: discord.Interaction,
+    responses_channel_id: int,
+    reporter: discord.abc.User,
+    message: str,
+) -> None:
+    """
+    Best-effort public update in the configured responses channel.
+    Pings reporter + posts same message as DM (single post).
+    """
+    if not interaction.guild:
+        return
+
+    cid = int(responses_channel_id or 0)
+    if cid <= 0:
+        return
+
+    ch = interaction.guild.get_channel(cid)
+    if not isinstance(ch, discord.TextChannel):
+        return
+
+    try:
+        await ch.send(
+            content=f"{reporter.mention}\n{message}",
+            allowed_mentions=discord.AllowedMentions(users=True),
+        )
+    except Exception:
+        pass
+
+
+# ----------------------------
 # Reference link validation (TVDB for TV shows, TMDB for movies)
 # ----------------------------
 
@@ -329,7 +373,7 @@ class VODTypePickerView(discord.ui.View):
 
 
 # ----------------------------
-# Resolve modal (keep yours; included here for completeness)
+# Resolve modal
 # ----------------------------
 
 class ResolveReportModal(discord.ui.Modal):
@@ -420,7 +464,7 @@ class ResolveReportModal(discord.ui.Modal):
                 if isinstance(staff_channel, discord.TextChannel):
                     staff_msg = await staff_channel.fetch_message(int(report["staff_message_id"]))
 
-                    reporter = await interaction.client.fetch_user(int(report["reporter_id"]))
+                    reporter_u = await interaction.client.fetch_user(int(report["reporter_id"]))
                     source = interaction.guild.get_channel(int(report["source_channel_id"])) or staff_channel
 
                     claimed_by = report.get("claimed_by_user_id")
@@ -429,7 +473,7 @@ class ResolveReportModal(discord.ui.Modal):
                     embed = build_staff_embed(
                         self.report_id,
                         report["report_type"],
-                        reporter,
+                        reporter_u,
                         source,
                         report["payload"],
                         "Resolved",
@@ -453,6 +497,9 @@ class ResolveReportModal(discord.ui.Modal):
             except Exception:
                 pass
 
+        # Build the same update message for DM + public post
+        reporter = None
+        msg = None
         try:
             reporter = await interaction.client.fetch_user(int(report["reporter_id"]))
             subj = report_subject(report["report_type"], report["payload"])
@@ -462,6 +509,11 @@ class ResolveReportModal(discord.ui.Modal):
             await try_dm(reporter, msg)
         except Exception:
             pass
+
+        # Public update (same message) if enabled + responses channel configured
+        if self.public_updates and reporter and msg:
+            responses_cid = _get_responses_channel_id_from_bot(interaction)
+            await _try_public_update(interaction, responses_cid, reporter, msg)
 
         try:
             self.db.set_ticket_channel_id(self.report_id, None)

@@ -33,6 +33,7 @@ class Config:
     tmdb_bearer_token: str
     staff_role_id: int
     modlogs_channel_id: int
+    responses_channel_id: int  # ✅ NEW
 
 
 def load_config() -> Config:
@@ -48,7 +49,6 @@ def load_config() -> Config:
 
     reports_channel_ids = _csv_ids(os.getenv("REPORTS_CHANNEL_IDS", "").strip())
     if not reports_channel_ids:
-        # Legacy single-channel name support
         legacy = os.getenv("REPORTS_CHANNEL_ID", "").strip()
         if legacy.isdigit():
             reports_channel_ids = [int(legacy)]
@@ -67,6 +67,11 @@ def load_config() -> Config:
 
     modlogs_channel_id = int(os.getenv("MODLOGS_CHANNEL_ID", "0"))
 
+    # ✅ NEW: responses channel for public updates
+    responses_channel_id = int(os.getenv("RESPONSES_CHANNEL_ID", "0"))
+    if public_updates and responses_channel_id <= 0:
+        raise RuntimeError("PUBLIC_UPDATES is enabled but RESPONSES_CHANNEL_ID is missing/invalid in .env")
+
     return Config(
         token=token,
         staff_channel_id=staff_channel_id,
@@ -78,4 +83,5 @@ def load_config() -> Config:
         tmdb_bearer_token=tmdb_bearer_token,
         staff_role_id=staff_role_id,
         modlogs_channel_id=modlogs_channel_id,
+        responses_channel_id=responses_channel_id,
     )
