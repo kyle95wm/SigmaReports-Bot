@@ -9,8 +9,8 @@ from discord.ext import commands, tasks
 from bot.utils import report_subject
 
 
-# Only "Resolved" is considered closed in your current workflow
-CLOSED_STATUSES = {"Resolved"}
+# Only "Resolved" and "Not Resolved" are considered closed in your current workflow
+CLOSED_STATUSES = {"Resolved", "Not Resolved"}
 
 
 def _is_staff(member: discord.Member, staff_role_id: int) -> bool:
@@ -83,7 +83,7 @@ class LiveboardCog(commands.Cog):
             title="📡 Liveboard — Active Reports",
             description=(
                 "This board updates automatically.\n"
-                "Reports marked **Resolved** are removed.\n\n"
+                "Closed reports are removed.\n\n"
                 f"Last update: {_ts(_utcnow())}"
             ),
         )
