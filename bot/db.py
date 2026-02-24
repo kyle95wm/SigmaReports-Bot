@@ -183,6 +183,16 @@ class ReportDB:
         )
         self.conn.commit()
 
+    # ✅ NEW: edit reporter
+    def update_reporter_id(self, report_id: int, new_reporter_id: int) -> bool:
+        cur = self.conn.cursor()
+        cur.execute(
+            "UPDATE reports SET reporter_id=?, updated_at=? WHERE id=?",
+            (int(new_reporter_id), _utcnow_iso(), int(report_id)),
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
+
     def get_by_id(self, report_id: int):
         cur = self.conn.cursor()
         cur.execute("SELECT * FROM reports WHERE id=?", (int(report_id),))

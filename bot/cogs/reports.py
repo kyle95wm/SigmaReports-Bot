@@ -117,10 +117,102 @@ class Reports(commands.Cog):
         if not await self._block_gate(interaction):
             return
 
-        # Fix A: chooser step (TV show vs Movie), then correct modal opens
         await interaction.response.send_message(
             "Is this a **TV show** or a **movie**?",
             view=VODTypePickerView(self.db, self.cfg),
+            ephemeral=True,
+        )
+
+    # ----------------------------
+    # Staff: edit report
+    # ----------------------------
+
+    @app_commands.command(
+        name="editreport",
+        description="Edit a report (staff only).",
+    )
+    @app_commands.describe(
+        report_id="The numeric report ID (e.g. 123)",
+        reporter="Set the reporter to this user",
+    )
+    async def editreport(self, interaction: discord.Interaction, report_id: int, reporter: discord.User):
+        if not interaction.guild:
+            return await interaction.response.send_message(
+                "This must be used in a server.",
+                ephemeral=True,
+            )
+
+        if not self._is_staff(interaction):
+            return await interaction.response.send_message("❌ Not allowed.", ephemeral=True)
+
+        report = self.db.get_report_by_id(int(report_id))
+        if not report or int(report.get("guild_id", 0)) != interaction.guild.id:
+            return await interaction.response.send_message("❌ Report not found.", ephemeral=True)
+
+        old_reporter_id = int(report.get("reporter_id", 0) or 0)
+        new_reporter_id = int(reporter.id)
+
+        if old_reporter_id == new_reporter_id:
+            return await interaction.response.send_message("Nothing changed (same reporter).", ephemeral=True)
+
+        ok = False
+        try:
+            ok = bool(self.db.update_reporter_id(int(report_id), new_reporter_id))
+        except Exception:
+            ok = False
+
+        if not ok:
+            return await interaction.response.send_message("❌ Failed to update reporter.", ephemeral=True)
+
+        # Refresh local report + update staff embed message if possible
+        report = self.db.get_report_by_id(int(report_id)) or report
+
+        staff_message_id = report.get("staff_message_id")
+        if staff_message_id:
+            staff_ch = interaction.guild.get_channel(self.cfg.staff_channel_id)
+            if isinstance(staff_ch, discord.TextChannel):
+                try:
+                    staff_msg = await staff_ch.fetch_message(int(staff_message_id))
+
+                    # rebuild embed with updated reporter
+                    try:
+                        new_reporter_user = await interaction.client.fetch_user(int(report["reporter_id"]))
+                    except Exception:
+                        new_reporter_user = interaction.client.get_user(int(report["reporter_id"])) or reporter
+
+                    source = interaction.guild.get_channel(int(report["source_channel_id"])) or staff_ch
+                    status = report.get("status") or "Open"
+
+                    ticket_channel_id = report.get("ticket_channel_id")
+
+                    embed = build_staff_embed(
+                        int(report["id"]),
+                        report["report_type"],
+                        new_reporter_user,
+                        source,
+                        report["payload"],
+                        str(status),
+                        ticket_channel_id=int(ticket_channel_id) if ticket_channel_id else None,
+                        claimed_by_user_id=report.get("claimed_by_user_id"),
+                        claimed_at=report.get("claimed_at"),
+                        resolved_by_id=report.get("resolved_by"),
+                        resolved_note=report.get("resolved_note"),
+                    )
+
+                    view = ReportActionView(
+                        self.db,
+                        self.cfg.staff_channel_id,
+                        self.cfg.support_channel_id,
+                        self.cfg.public_updates,
+                        self.cfg.staff_role_id,
+                    )
+
+                    await staff_msg.edit(embed=embed, view=view)
+                except Exception:
+                    pass
+
+        await interaction.response.send_message(
+            f"✅ Updated report **#{report_id}** reporter to {reporter.mention}.",
             ephemeral=True,
         )
 
@@ -222,7 +314,6 @@ class Reports(commands.Cog):
 
         source = interaction.guild.get_channel(report["source_channel_id"]) or staff_ch
 
-        # Pull ticket + claim info if present (for cosmetic display)
         ticket_channel_id = report.get("ticket_channel_id")
         claimed_by_user_id = report.get("claimed_by_user_id")
         claimed_at = report.get("claimed_at")
