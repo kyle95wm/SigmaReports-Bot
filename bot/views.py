@@ -9,7 +9,7 @@ from bot.utils import build_staff_embed, report_subject, try_dm
 
 
 CLOSED_STATUSES = {"Resolved", "Can't replicate", "Fixed", "Not Resolved"}
-TICKETS_CATEGORY_ID = 1458642805437239397
+TICKETS_CATEGORY_ID = 1481229575777423362
 
 
 def _now_iso() -> str:
