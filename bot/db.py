@@ -97,46 +97,12 @@ class ReportDB:
             """
         )
 
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS plex_liveboards (
-                guild_id INTEGER PRIMARY KEY,
-                channel_id INTEGER NOT NULL,
-                message_id INTEGER NOT NULL
-            )
-            """
-        )
-
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS plex_statuses (
-                guild_id INTEGER NOT NULL,
-                server_name TEXT NOT NULL,
-                status TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                PRIMARY KEY (guild_id, server_name)
-            )
-            """
-        )
-
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS plex_manual_overrides (
-                guild_id INTEGER NOT NULL,
-                server_name TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                PRIMARY KEY (guild_id, server_name)
-            )
-            """
-        )
-
         self.conn.commit()
 
         # Newer features
         self._ensure_column("reports", "ticket_channel_id", "INTEGER")
         self._ensure_column("reports", "resolved_by", "INTEGER")
         self._ensure_column("reports", "resolved_at", "TEXT")
-        self._ensure_column("plex_manual_overrides", "staff_message_id", "INTEGER")
 
         # Default setting values
         if self._get_setting("report_pings_enabled") is None:
@@ -179,6 +145,7 @@ class ReportDB:
         now = _utcnow_iso()
 
         cur = self.conn.cursor()
+        # Always set updated_at too (some existing DBs have it NOT NULL)
         cur.execute(
             f"""
             INSERT INTO reports
@@ -216,6 +183,7 @@ class ReportDB:
         )
         self.conn.commit()
 
+    # ✅ NEW: edit reporter
     def update_reporter_id(self, report_id: int, new_reporter_id: int) -> bool:
         cur = self.conn.cursor()
         cur.execute(
@@ -230,6 +198,7 @@ class ReportDB:
         cur.execute("SELECT * FROM reports WHERE id=?", (int(report_id),))
         return self._row_to_report(cur.fetchone())
 
+    # Compatibility
     def get_report_by_id(self, report_id: int):
         return self.get_by_id(report_id)
 
@@ -272,6 +241,7 @@ class ReportDB:
 
         return out
 
+    # Used by liveboard cog
     def list_active_reports(self, guild_id: int, closed_statuses: Optional[Iterable[str]] = None) -> list[dict]:
         closed = {s.strip() for s in (closed_statuses or []) if str(s).strip()}
         cur = self.conn.cursor()
@@ -417,7 +387,7 @@ class ReportDB:
             )
         return out
 
-    # ---------------- Report liveboard ----------------
+    # ---------------- Liveboard ----------------
 
     def set_liveboard(self, guild_id: int, channel_id: int, message_id: int):
         cur = self.conn.cursor()
@@ -450,146 +420,4 @@ class ReportDB:
     def clear_liveboard(self, guild_id: int):
         cur = self.conn.cursor()
         cur.execute("DELETE FROM liveboards WHERE guild_id=?", (int(guild_id),))
-        self.conn.commit()
-
-    # ---------------- Plex liveboard ----------------
-
-    def set_plex_liveboard(self, guild_id: int, channel_id: int, message_id: int):
-        cur = self.conn.cursor()
-        cur.execute(
-            """
-            INSERT INTO plex_liveboards (guild_id, channel_id, message_id)
-            VALUES (?, ?, ?)
-            ON CONFLICT(guild_id)
-            DO UPDATE SET channel_id=excluded.channel_id,
-                          message_id=excluded.message_id
-            """,
-            (int(guild_id), int(channel_id), int(message_id)),
-        )
-        self.conn.commit()
-
-    def get_plex_liveboard(self, guild_id: int):
-        cur = self.conn.cursor()
-        cur.execute(
-            "SELECT guild_id, channel_id, message_id FROM plex_liveboards WHERE guild_id=?",
-            (int(guild_id),),
-        )
-        row = cur.fetchone()
-        if not row:
-            return None
-        return {
-            "guild_id": row["guild_id"],
-            "channel_id": row["channel_id"],
-            "message_id": row["message_id"],
-        }
-
-    def list_plex_liveboards(self) -> list[dict]:
-        cur = self.conn.cursor()
-        cur.execute("SELECT guild_id, channel_id, message_id FROM plex_liveboards")
-        rows = cur.fetchall()
-        return [
-            {"guild_id": r["guild_id"], "channel_id": r["channel_id"], "message_id": r["message_id"]}
-            for r in rows
-        ]
-
-    def clear_plex_liveboard(self, guild_id: int):
-        cur = self.conn.cursor()
-        cur.execute("DELETE FROM plex_liveboards WHERE guild_id=?", (int(guild_id),))
-        self.conn.commit()
-
-    # ---------------- Plex statuses ----------------
-
-    def set_plex_status(self, guild_id: int, server_name: str, status: str, updated_at: Optional[str] = None):
-        now = updated_at or _utcnow_iso()
-        cur = self.conn.cursor()
-        cur.execute(
-            """
-            INSERT INTO plex_statuses (guild_id, server_name, status, updated_at)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(guild_id, server_name)
-            DO UPDATE SET status=excluded.status,
-                          updated_at=excluded.updated_at
-            """,
-            (int(guild_id), str(server_name).upper(), str(status), now),
-        )
-        self.conn.commit()
-
-    def set_plex_manual_override(
-        self,
-        guild_id: int,
-        server_name: str,
-        is_active: bool,
-        staff_message_id: Optional[int] = None,
-    ):
-        cur = self.conn.cursor()
-        server_name = str(server_name).upper()
-
-        if is_active:
-            cur.execute(
-                """
-                INSERT INTO plex_manual_overrides (guild_id, server_name, created_at, staff_message_id)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(guild_id, server_name)
-                DO UPDATE SET created_at=excluded.created_at,
-                              staff_message_id=COALESCE(excluded.staff_message_id, plex_manual_overrides.staff_message_id)
-                """,
-                (int(guild_id), server_name, _utcnow_iso(), int(staff_message_id) if staff_message_id else None),
-            )
-        else:
-            cur.execute(
-                "DELETE FROM plex_manual_overrides WHERE guild_id=? AND server_name=?",
-                (int(guild_id), server_name),
-            )
-
-        self.conn.commit()
-
-    def has_plex_manual_override(self, guild_id: int, server_name: str) -> bool:
-        cur = self.conn.cursor()
-        cur.execute(
-            "SELECT 1 FROM plex_manual_overrides WHERE guild_id=? AND server_name=?",
-            (int(guild_id), str(server_name).upper()),
-        )
-        return cur.fetchone() is not None
-
-    def get_plex_manual_override(self, guild_id: int, server_name: str) -> Optional[dict]:
-        cur = self.conn.cursor()
-        cur.execute(
-            """
-            SELECT guild_id, server_name, created_at, staff_message_id
-            FROM plex_manual_overrides
-            WHERE guild_id=? AND server_name=?
-            """,
-            (int(guild_id), str(server_name).upper()),
-        )
-        row = cur.fetchone()
-        if not row:
-            return None
-
-        return {
-            "guild_id": row["guild_id"],
-            "server_name": row["server_name"],
-            "created_at": row["created_at"],
-            "staff_message_id": row["staff_message_id"],
-        }
-
-    def clear_plex_manual_overrides(self, guild_id: int):
-        cur = self.conn.cursor()
-        cur.execute("DELETE FROM plex_manual_overrides WHERE guild_id=?", (int(guild_id),))
-        self.conn.commit()
-
-    def get_plex_statuses(self, guild_id: int) -> dict[str, str]:
-        cur = self.conn.cursor()
-        cur.execute(
-            "SELECT server_name, status FROM plex_statuses WHERE guild_id=?",
-            (int(guild_id),),
-        )
-        rows = cur.fetchall()
-        out: dict[str, str] = {}
-        for r in rows:
-            out[str(r["server_name"]).upper()] = str(r["status"])
-        return out
-
-    def clear_plex_statuses(self, guild_id: int):
-        cur = self.conn.cursor()
-        cur.execute("DELETE FROM plex_statuses WHERE guild_id=?", (int(guild_id),))
         self.conn.commit()

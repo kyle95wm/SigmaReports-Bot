@@ -46,7 +46,6 @@ DEFAULT_GUILD_ID_FOR_SYNC = 1457559352717086917
 class SigmaReportsBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
-        intents.message_content = True
         super().__init__(command_prefix="!", intents=intents)
 
         self.cfg = load_config()
@@ -83,7 +82,6 @@ class SigmaReportsBot(commands.Bot):
             "bot.cogs.moderation",
             "bot.cogs.panel",
             "bot.cogs.liveboard",
-            "bot.cogs.plex_liveboard",
         ):
             try:
                 await self.load_extension(ext)
